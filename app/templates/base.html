@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AlwaysOnTime</title>
+    
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+      
+    <!-- HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    
+    <!-- Main CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+  </head>
+  <body>
+    <header>
+      <div class="container flex justify-between items-center">
+        <a href="/" class="logo">
+          <span>🚇</span> {{ t('App Name') or 'Always On Time' }}
+        </a>
+        
+        <nav class="flex items-center gap-4">
+          <a href="/" class="hide-mobile">{{ t('Home') or 'Home' }}</a>
+          <a href="/favorites" class="hide-mobile">{{ t('Favorites') or 'Favorites' }}</a>
+          <a href="/login" class="btn btn-outline">{{ t('Login') or 'Login' }}</a>
+          
+          <button id="theme-toggle" onclick="toggleTheme()" class="btn btn-outline" aria-label="Toggle Theme">
+            <span id="theme-icon">☀️</span>
+            <span id="theme-text" class="hide-mobile">Light</span>
+          </button>
+          
+          <div class="flex gap-2">
+            <a href="?lang=en" class="badge badge-info">EN</a>
+            <a href="?lang=es" class="badge badge-info">ES</a>
+          </div>
+        </nav>
+      </div>
+    </header>
+    
+    <main class="container mt-4">
+      {% block content %}{% endblock %}
+    </main>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+  </body>
+</html>

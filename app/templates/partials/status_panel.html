@@ -1,0 +1,31 @@
+<div class="status-grid">
+  <div class="status-item">
+    <h3>Subway</h3>
+    <span class="status-badge status-{{ status.subway.status|lower|replace(' ', '-')|replace('_', '-') }}">
+      {{ status.subway.status }}
+    </span>
+  </div>
+  <div class="status-item">
+    <h3>Bus</h3>
+    <span class="status-badge status-{{ status.bus.status|lower|replace(' ', '-')|replace('_', '-') }}">
+      {{ status.bus.status }}
+    </span>
+  </div>
+  <div class="status-item">
+    <h3>LIRR</h3>
+    <span class="status-badge status-{{ status.lirr.status|lower|replace(' ', '-')|replace('_', '-') }}">
+      {{ status.lirr.status }}
+    </span>
+  </div>
+  <div class="status-item">
+    <h3>Metro-North</h3>
+    <span class="status-badge status-{{ status.metro_north.status|lower|replace(' ', '-')|replace('_', '-') }}">
+      {{ status.metro_north.status }}
+    </span>
+  </div>
+</div>
+<p class="status-updated">Last updated: <span id="status-time"></span></p>
+<script>
+  document.getElementById('status-time').textContent = new Date().toLocaleTimeString();
+</script>
+

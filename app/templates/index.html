@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="grid-layout">
+  <!-- Status Panel -->
+  <section class="card">
+    <h2 class="mb-4">Service Status</h2>
+    <div id="status-panel" hx-get="/api/status" hx-trigger="load, every 30s" hx-target="#status-panel"
+      hx-swap="innerHTML">
+      <div class="flex items-center justify-center p-4">
+        <span class="loading-spinner"></span> Loading status...
+      </div>
+    </div>
+  </section>
+
+  <!-- Alerts Panel -->
+  <section class="card">
+    <h2 class="mb-4">Service Alerts</h2>
+    <div id="alerts-panel" hx-get="/api/alerts" hx-trigger="load, every 60s" hx-target="#alerts-panel"
+      hx-swap="innerHTML">
+      <div class="flex items-center justify-center p-4">
+        <span class="loading-spinner"></span> Loading alerts...
+      </div>
+    </div>
+  </section>
+
+  <!-- Favorites Alerts Panel -->
+  <section class="card">
+    <h2 class="mb-4">My Favorites Alerts</h2>
+    <div id="favorites-alerts-panel" hx-get="/api/favorites/alerts" hx-trigger="load, every 30s"
+      hx-target="#favorites-alerts-panel" hx-swap="innerHTML">
+      <div class="flex items-center justify-center p-4">
+        <span class="loading-spinner"></span> Loading favorite alerts...
+      </div>
+    </div>
+  </section>
+
+  <!-- Accessibility Panel -->
+  <section class="card">
+    <h2 class="mb-4">Accessibility</h2>
+    <div id="accessibility-panel" hx-get="/api/accessibility" hx-trigger="load, every 300s"
+      hx-target="#accessibility-panel" hx-swap="innerHTML">
+      <div class="flex items-center justify-center p-4">
+        <span class="loading-spinner"></span> Loading accessibility information...
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Map Section -->
+<section class="card mt-4">
+  <h2 class="mb-4">Live Map</h2>
+  <div id="map"></div>
+</section>
+
+<style>
+  .grid-layout {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem;
+  }
+
+  @media (max-width: 768px) {
+    .grid-layout {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+{% endblock %}

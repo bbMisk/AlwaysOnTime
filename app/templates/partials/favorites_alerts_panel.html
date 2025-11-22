@@ -1,0 +1,20 @@
+{% if alerts %}
+  <div class="alerts-list">
+    {% for alert in alerts %}
+      <div class="alert-item alert-{{ alert.severity }}">
+        <div class="alert-header">
+          <strong>{{ alert.header }}</strong>
+          {% if alert.affected_lines %}
+            <span class="alert-lines">Lines: {{ alert.affected_lines }}</span>
+          {% endif %}
+        </div>
+        {% if alert.description %}
+          <div class="alert-description">{{ alert.description }}</div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="no-alerts">No alerts for your favorite stations/routes. <a href="/favorites">Add favorites</a> to get personalized alerts.</p>
+{% endif %}
+

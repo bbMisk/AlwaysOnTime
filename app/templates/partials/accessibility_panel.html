@@ -1,0 +1,21 @@
+<div class="accessibility-stats">
+  <p><strong>{{ data.accessible_stations }}</strong> of <strong>{{ data.total_stations }}</strong> stations are accessible.</p>
+</div>
+{% if data.stations %}
+  <div class="accessible-stations-list">
+    <h4>Accessible Stations:</h4>
+    <ul>
+      {% for station in data.stations %}
+        <li>
+          <strong>{{ station.name }}</strong>
+          {% if station.lines %}
+            <span class="station-lines">({{ station.lines }})</span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </div>
+{% else %}
+  <p>No accessible station data available.</p>
+{% endif %}
+

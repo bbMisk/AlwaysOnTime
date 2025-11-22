@@ -1,0 +1,1213 @@
+{% extends "base.html" %}
+{% block content %}
+<section style="max-width: 600px; margin: 0 auto;">
+  <h1 style="text-align: center; margin-bottom: 24px; color: var(--text-primary);">{{ t('Plan Your Route') or 'Plan Your
+    Route' }}</h1>
+
+  <form id="route-form" onsubmit="planRoute(event)">
+    <div style="margin-bottom: 16px; position: relative;">
+      <label for="origin" style="color: var(--text-primary);"><strong>{{ t('From') or 'From' }}:</strong></label>
+      <div style="position: relative;">
+        <input type="text" id="origin" name="origin"
+          placeholder="{{ t('Enter starting address or location') or 'Enter starting address or location' }}" required
+          autocomplete="off"
+          style="width: 100%; padding: 10px 120px 10px 12px; margin-top: 4px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; background: var(--bg-tertiary); color: var(--text-primary);"
+          oninput="searchLocations('origin', this.value)" onfocus="showSuggestions('origin')"
+          onblur="setTimeout(() => hideSuggestions('origin'), 200)">
+        <button type="button" onclick="useCurrentLocation('origin')"
+          style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); padding: 6px 10px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; z-index: 10;">
+          📍 {{ t('Use My Location') or 'Use My Location' }}
+        </button>
+        <div id="origin-suggestions" class="suggestions-dropdown" style="display: none;"></div>
+      </div>
+    </div>
+    <div style="margin-bottom: 16px; position: relative;">
+      <label for="destination" style="color: var(--text-primary);"><strong>{{ t('To') or 'To' }}:</strong></label>
+      <div style="position: relative;">
+        <input type="text" id="destination" name="destination"
+          placeholder="{{ t('Enter destination address or location') or 'Enter destination address or location' }}"
+          required autocomplete="off"
+          style="width: 100%; padding: 10px 120px 10px 12px; margin-top: 4px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; background: var(--bg-tertiary); color: var(--text-primary);"
+          oninput="searchLocations('destination', this.value)" onfocus="showSuggestions('destination')"
+          onblur="setTimeout(() => hideSuggestions('destination'), 200)">
+        <button type="button" onclick="useCurrentLocation('destination')"
+          style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); padding: 6px 10px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; z-index: 10;">
+          📍 {{ t('Use My Location') or 'Use My Location' }}
+        </button>
+        <div id="destination-suggestions" class="suggestions-dropdown" style="display: none;"></div>
+      </div>
+    </div>
+    <button type="submit"
+      style="padding: 12px 20px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: 600; font-size: 16px;">
+      {{ t('Plan Route') or 'Plan Route' }}
+    </button>
+  </form>
+</section>
+
+<section id="route-results" style="display: none; max-width: 900px; margin: 32px auto 0;">
+  <div id="route-info"></div>
+</section>
+
+<style>
+  .suggestions-dropdown {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-top: none;
+    border-radius: 0 0 4px 4px;
+    max-height: 200px;
+    overflow-y: auto;
+    z-index: 1000;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  }
+
+  .suggestion-item {
+    padding: 10px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border-color);
+  }
+
+  .suggestion-item:hover {
+    background: var(--bg-secondary);
+  }
+
+  .suggestion-item:last-child {
+    border-bottom: none;
+  }
+
+  .suggestion-name {
+    font-weight: 500;
+    color: var(--text-primary);
+  }
+
+  .suggestion-details {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-top: 2px;
+  }
+
+  /* Loading spinner animation */
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Error message styling */
+  .error-message {
+    padding: 16px;
+    background: rgba(239, 68, 68, 0.1);
+    border: 2px solid var(--error);
+    border-radius: 8px;
+    color: var(--error);
+    margin: 16px 0;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .error-message::before {
+    content: '⚠️';
+    font-size: 20px;
+  }
+
+  .error-message button {
+    margin-left: auto;
+    padding: 4px 12px;
+    background: var(--error);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+</style>
+
+<script>
+  // Error display function
+  function showError(message) {
+    const resultsDiv = document.getElementById('route-results');
+    const routeInfo = document.getElementById('route-info');
+    resultsDiv.style.display = 'block';
+    routeInfo.innerHTML = `
+        <div class="error-message">
+          <span>${message}</span>
+          <button onclick="this.parentElement.remove()">✕</button>
+        </div>
+      `;
+    // Auto-hide after 10 seconds
+    setTimeout(() => {
+      const errorDiv = routeInfo.querySelector('.error-message');
+      if (errorDiv) {
+        errorDiv.style.transition = 'opacity 0.3s';
+        errorDiv.style.opacity = '0';
+        setTimeout(() => errorDiv.remove(), 300);
+      }
+    }, 10000);
+  }
+  let searchTimeouts = {};
+
+  function searchLocations(field, query) {
+    // Clear previous timeout
+    if (searchTimeouts[field]) {
+      clearTimeout(searchTimeouts[field]);
+    }
+
+    if (query.length < 2) {
+      hideSuggestions(field);
+      return;
+    }
+
+    // Debounce search
+    searchTimeouts[field] = setTimeout(() => {
+      fetch(`/api/route/search?q=${encodeURIComponent(query)}`)
+        .then(response => response.json())
+        .then(data => {
+          displaySuggestions(field, data.results);
+        })
+        .catch(error => {
+          console.error('Search error:', error);
+        });
+    }, 300);
+  }
+
+  function displaySuggestions(field, results) {
+    const dropdown = document.getElementById(`${field}-suggestions`);
+    if (!results || results.length === 0) {
+      dropdown.style.display = 'none';
+      return;
+    }
+
+    dropdown.innerHTML = results.map(result => `
+        <div class="suggestion-item" onclick="selectLocation('${field}', '${result.display_name.replace(/'/g, "\\'")}', ${result.latitude}, ${result.longitude})">
+          <div class="suggestion-name">${result.display_name}</div>
+        </div>
+      `).join('');
+    dropdown.style.display = 'block';
+  }
+
+  function showSuggestions(field) {
+    const input = document.getElementById(field);
+    const dropdown = document.getElementById(`${field}-suggestions`);
+    if (input.value.length >= 2 && dropdown.innerHTML) {
+      dropdown.style.display = 'block';
+    }
+  }
+
+  function hideSuggestions(field) {
+    const dropdown = document.getElementById(`${field}-suggestions`);
+    dropdown.style.display = 'none';
+  }
+
+  function selectLocation(field, name, lat, lon) {
+    document.getElementById(field).value = name;
+    hideSuggestions(field);
+    // Store coordinates for later use
+    document.getElementById(field).dataset.lat = lat;
+    document.getElementById(field).dataset.lon = lon;
+  }
+
+  function useCurrentLocation(field) {
+    if (!navigator.geolocation) {
+      alert('Geolocation is not supported by your browser');
+      return;
+    }
+
+    const button = event.target;
+    button.disabled = true;
+    button.textContent = 'Getting location...';
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+
+        // Reverse geocode to get address
+        fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json`, {
+          headers: { 'User-Agent': 'AlwaysOnTime/1.0' }
+        })
+          .then(response => response.json())
+          .then(data => {
+            const address = data.display_name || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+            document.getElementById(field).value = address;
+            document.getElementById(field).dataset.lat = lat;
+            document.getElementById(field).dataset.lon = lon;
+            button.disabled = false;
+            button.textContent = '📍 Use My Location';
+          })
+          .catch(error => {
+            document.getElementById(field).value = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+            document.getElementById(field).dataset.lat = lat;
+            document.getElementById(field).dataset.lon = lon;
+            button.disabled = false;
+            button.textContent = '📍 Use My Location';
+          });
+      },
+      (error) => {
+        showError('Could not get your location. Please enable location services or enter an address manually.');
+        button.disabled = false;
+        button.textContent = '📍 Use My Location';
+      }
+    );
+  }
+
+  function planRoute(event) {
+    event.preventDefault();
+
+    const originInput = document.getElementById('origin');
+    const destInput = document.getElementById('destination');
+
+    // Check if we have stored coordinates
+    let origin = originInput.value;
+    let destination = destInput.value;
+
+    // If coordinates are stored, use them directly
+    if (originInput.dataset.lat && originInput.dataset.lon) {
+      origin = `${originInput.dataset.lat},${originInput.dataset.lon}`;
+    }
+    if (destInput.dataset.lat && destInput.dataset.lon) {
+      destination = `${destInput.dataset.lat},${destInput.dataset.lon}`;
+    }
+
+    // Show loading state (only in button, not in results area)
+    const submitButton = event.target.querySelector('button[type="submit"]');
+    const originalText = submitButton.innerHTML;
+    submitButton.disabled = true;
+    submitButton.innerHTML = '<span style="display: inline-block; width: 16px; height: 16px; border: 2px solid #fff; border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle;"></span>Planning route...';
+
+    fetch('/api/route/plan', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ origin, destination })
+    })
+      .then(async response => {
+        // Check content type before parsing
+        const contentType = response.headers.get('content-type');
+        const isJson = contentType && contentType.includes('application/json');
+
+        if (!response.ok) {
+          if (isJson) {
+            const data = await response.json();
+            throw new Error(data.error || `Server error: ${response.status}`);
+          } else {
+            // Server returned HTML or other non-JSON error
+            const text = await response.text();
+            throw new Error(`Server error: ${response.status}. Please try again.`);
+          }
+        }
+
+        if (isJson) {
+          return response.json();
+        } else {
+          // Unexpected non-JSON response
+          const text = await response.text();
+          throw new Error('Server returned unexpected response format');
+        }
+      })
+      .then(data => {
+        submitButton.disabled = false;
+        submitButton.innerHTML = originalText;
+
+        if (data.error) {
+          showError('Error planning route: ' + data.error);
+          return;
+        }
+
+        displayRoute(data);
+      })
+      .catch(error => {
+        console.error('Error:', error);
+        submitButton.disabled = false;
+        submitButton.innerHTML = originalText;
+        showError('Error planning route: ' + (error.message || 'Please check your addresses and try again.'));
+      });
+  }
+
+  let selectedRouteIndex = 0;
+  let currentRouteData = null;
+
+  function displayRoute(routeData) {
+    currentRouteData = routeData;
+
+    // Clear previous route (only if map exists)
+    if (routeMap) {
+      if (routeLayer) {
+        routeMap.removeLayer(routeLayer);
+      }
+      routeMap.eachLayer(function (layer) {
+        if (layer instanceof L.Marker || layer instanceof L.Polyline) {
+          routeMap.removeLayer(layer);
+        }
+      });
+    }
+
+    // Show results only (map will show when route is clicked)
+    document.getElementById('route-results').style.display = 'block';
+
+    // Scroll to results
+    document.getElementById('route-results').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // Display route options
+    const routeInfo = document.getElementById('route-info');
+    let html = '<div class="route-summary">';
+    // Show addresses without coordinates
+    // Filter out raw coordinate strings
+    let originDisplay = routeData.origin.display_name || routeData.origin.address || '';
+    let destDisplay = routeData.destination.display_name || routeData.destination.address || '';
+
+    // If it looks like coordinates (contains comma and numbers), try to format better or hide
+    if (originDisplay.match(/^-?\d+\.?\d*,-?\d+\.?\d*$/)) {
+      // It's raw coordinates - use a generic label or try to get address
+      originDisplay = 'Your Location';
+    }
+    if (destDisplay.match(/^-?\d+\.?\d*,-?\d+\.?\d*$/)) {
+      // It's raw coordinates - use a generic label or try to get address
+      destDisplay = 'Destination';
+    }
+
+    html += `<div style="background: var(--bg-tertiary); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border-color); font-size: 14px;">`;
+    html += `<div style="display: flex; gap: 16px; align-items: center;"><span style="color: var(--text-muted);">📍</span><span style="color: var(--text-primary);">${originDisplay}</span></div>`;
+    html += `<div style="display: flex; gap: 16px; align-items: center; margin-top: 6px;"><span style="color: var(--text-muted);">🎯</span><span style="color: var(--text-primary);">${destDisplay}</span></div>`;
+    html += `</div>`;
+
+    // Strategy colors and icons - adjusted for better dark mode visibility
+    const isDarkMode = document.documentElement.getAttribute('data-theme') !== 'light';
+    const strategyStyles = {
+      'safest': {
+        color: '#10b981',
+        bg: isDarkMode ? 'rgba(16, 185, 129, 0.15)' : '#d1fae5',
+        icon: '🛡️'
+      },
+      'least_walking': {
+        color: '#3b82f6',
+        bg: isDarkMode ? 'rgba(59, 130, 246, 0.15)' : '#dbeafe',
+        icon: '🚶'
+      },
+      'fastest': {
+        color: '#f59e0b',
+        bg: isDarkMode ? 'rgba(245, 158, 11, 0.15)' : '#fef3c7',
+        icon: '⚡'
+      }
+    };
+
+    // Display each route option
+    routeData.routes.forEach((route, index) => {
+      const isSelected = index === selectedRouteIndex;
+      const strategy = strategyStyles[route.strategy] || strategyStyles['safest'];
+
+      const bgColor = isSelected ? strategy.bg : 'var(--bg-secondary)';
+      const borderColor = isSelected ? strategy.color : 'var(--border-color)';
+      html += `<div class="route-option ${isSelected ? 'selected' : ''}" onclick="viewRouteOnMap(${index})" style="margin: 12px 0; padding: 16px; background: ${bgColor}; border: 2px solid ${borderColor}; border-left: 4px solid ${strategy.color}; border-radius: 8px; cursor: pointer; transition: all 0.2s; box-shadow: ${isSelected ? '0 2px 8px rgba(0,0,0,0.2)' : '0 1px 3px rgba(0,0,0,0.1)'};">`;
+      html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">`;
+      html += `<div style="display: flex; align-items: center; gap: 10px;">`;
+      html += `<span style="font-size: 20px;">${strategy.icon}</span>`;
+      html += `<strong style="font-size: 18px; color: ${strategy.color}; font-weight: 700;">${route.strategy_name}</strong>`;
+      if (route.direct_line) {
+        html += `<span style="background: #10b981; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 8px;">Direct</span>`;
+      }
+      html += `</div>`;
+      html += `<div style="display: flex; align-items: center; gap: 8px;">`;
+      html += `<strong style="font-size: 20px; color: ${strategy.color}; font-weight: 700;">${route.total_time.total} min</strong>`;
+      html += `</div>`;
+      html += `</div>`;
+
+      // Show route-specific delays if any (compact, specific lines with clear names)
+      if (route.delays && route.delays.length > 0) {
+        // Group delays by line and show each line's status clearly
+        const delaysByLine = {};
+        route.delays.forEach(delay => {
+          const line = delay.line;
+          if (!delaysByLine[line]) {
+            delaysByLine[line] = [];
+          }
+          delaysByLine[line].push(delay.status);
+        });
+
+        html += `<div style="margin: 10px 0; padding: 10px 12px; background: rgba(245, 158, 11, ${isDarkMode ? '0.2' : '0.1'}); border-left: 4px solid var(--warning); border-radius: 6px; font-size: 13px; font-weight: 600;">`;
+        html += `<span style="color: var(--warning); font-weight: 700;">⚠️ Delays:</span> `;
+        html += Object.keys(delaysByLine).map(line => {
+          const statuses = [...new Set(delaysByLine[line])];
+          return `<span style="color: var(--warning); font-weight: 700;">Line ${line}</span><span style="color: var(--text-secondary);"> (${statuses.join(', ')})</span>`;
+        }).join(', ');
+        html += `</div>`;
+      }
+
+      // Show live train information prominently FIRST
+      if (route.trains && route.trains.length > 0) {
+        const primaryTrain = route.trains[0];
+        const backupTrain = route.trains.length > 1 ? route.trains[1] : null;
+
+
+        const lineColor = getLineColor(primaryTrain.route_id);
+        const walkTime = route.origin_station.walk_time;
+        const trainArrivesIn = primaryTrain.minutes_away;
+
+        // Check if train might be missed (arrives before or very close to walk time)
+        const mightMiss = trainArrivesIn < walkTime;
+        const isEstimated = primaryTrain.estimated || false;
+        const warningStyle = mightMiss ? `background: rgba(245, 158, 11, 0.1); border: 2px solid var(--warning);` : '';
+
+        // Use lighter background for better text readability
+        const bgOpacity = isDarkMode ? '0.4' : '0.25';
+        const textBg = isDarkMode ? 'var(--bg-secondary)' : 'rgba(255, 255, 255, 0.8)';
+        html += `<div style="margin: 10px 0; padding: 12px; background: ${textBg}; border: 2px solid ${lineColor}; border-left: 4px solid ${lineColor}; border-radius: 8px; ${warningStyle}">`;
+        html += `<div style="display: flex; align-items: center; gap: 12px;">`;
+        html += `<div style="width: 48px; height: 48px; background: ${lineColor}; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">`;
+        html += `<span style="font-size: 20px; font-weight: 700; color: white;">${primaryTrain.route_id}</span>`;
+        html += `</div>`;
+        html += `<div style="flex: 1; min-width: 0;">`;
+        html += `<div style="font-size: 24px; font-weight: 700; color: var(--text-primary); line-height: 1.3;"><span data-train="primary-time">${primaryTrain.minutes_away}</span><span style="font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-left: 4px;">min</span></div>`;
+        html += `<div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-weight: 500;"><span data-train="primary-arrival">${primaryTrain.arrival_time}</span>${isEstimated ? ' <span style="color: var(--accent); font-weight: 600;">(est.)</span>' : ''}${mightMiss ? ' <span style="color: var(--warning);">⚠️</span>' : ''}</div>`;
+        html += `</div>`;
+        html += `</div>`;
+
+        // Show backup train for safest option (matching primary train style)
+
+        if (backupTrain && route.strategy === 'safest') {
+          const backupLineColor = getLineColor(backupTrain.route_id);
+          const backupEstimated = backupTrain.estimated || false;
+
+          // Use lighter background for better text readability
+          const backupTextBg = isDarkMode ? 'var(--bg-secondary)' : 'rgba(255, 255, 255, 0.8)';
+          html += `<div style="margin-top: 8px; padding: 12px; background: ${backupTextBg}; border: 2px solid ${backupLineColor}; border-left: 4px solid ${backupLineColor}; border-radius: 8px;">`;
+          html += `<div style="display: flex; align-items: center; gap: 12px;">`;
+          html += `<div style="width: 48px; height: 48px; background: ${backupLineColor}; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">`;
+          html += `<span data-train="backup-badge" style="font-size: 20px; font-weight: 700; color: white;">${backupTrain.route_id}</span>`;
+          html += `</div>`;
+          html += `<div style="flex: 1; min-width: 0;">`;
+          html += `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Backup</div>`;
+          html += `<div style="font-size: 24px; font-weight: 700; color: var(--text-primary); line-height: 1.3;"><span data-train="backup-time">${backupTrain.minutes_away}</span><span style="font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-left: 4px;">min</span></div>`;
+          html += `<div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-weight: 500;"><span data-train="backup-arrival">${backupTrain.arrival_time}</span>${backupEstimated ? ' <span style="color: var(--accent); font-weight: 600;">(est.)</span>' : ''}</div>`;
+          html += `</div>`;
+          html += `</div>`;
+          html += `</div>`;
+        }
+
+        html += `</div>`;
+      } else {
+        html += `<div style="margin: 10px 0; padding: 12px; background: rgba(245, 158, 11, ${isDarkMode ? '0.2' : '0.1'}); border-left: 4px solid var(--warning); border-radius: 6px; font-size: 14px; color: var(--warning); font-weight: 600;">⚠️ No trains in next 10 min</div>`;
+      }
+
+      // Timeline view removed - moved to modal
+      html += `</div>`;
+
+      html += `</div>`;
+    });
+
+    html += '</div>';
+    routeInfo.innerHTML = html;
+
+    // Don't display map automatically - only when user clicks a route
+
+    // Set up auto-refresh for train times (update every 30 seconds)
+    if (routeData.routes && routeData.routes.length > 0) {
+      // Clear any existing interval
+      if (window.routeRefreshInterval) {
+        clearInterval(window.routeRefreshInterval);
+      }
+
+      // Refresh train times every 30 seconds
+      window.routeRefreshInterval = setInterval(() => {
+        refreshTrainTimes();
+      }, 30000);
+    }
+  }
+
+  function refreshTrainTimes() {
+    if (!currentRouteData) return;
+
+    const originInput = document.getElementById('origin');
+    const destInput = document.getElementById('destination');
+
+    // Get current origin and destination
+    let origin = originInput.value;
+    let destination = destInput.value;
+
+    // If coordinates are stored, use them directly
+    if (originInput.dataset.lat && originInput.dataset.lon) {
+      origin = `${originInput.dataset.lat},${originInput.dataset.lon}`;
+    }
+    if (destInput.dataset.lat && destInput.dataset.lon) {
+      destination = `${destInput.dataset.lat},${destInput.dataset.lon}`;
+    }
+
+    // Fetch updated route data
+    fetch('/api/route/plan', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ origin, destination })
+    })
+      .then(async response => {
+        const contentType = response.headers.get('content-type');
+        const isJson = contentType && contentType.includes('application/json');
+        if (isJson) {
+          return response.json();
+        } else {
+          const text = await response.text();
+          throw new Error('Invalid response format');
+        }
+      })
+      .then(data => {
+        if (!data.error && data.routes) {
+          // Update current route data with fresh train times
+          currentRouteData = data;
+          // Re-render just the train information sections
+          updateTrainTimes(data);
+        }
+      })
+      .catch(error => {
+        console.error('Error refreshing train times:', error);
+      });
+  }
+
+  function updateTrainTimes(routeData) {
+    // Update train times in the displayed routes
+    routeData.routes.forEach((route, index) => {
+      if (route.trains && route.trains.length > 0) {
+        const primaryTrain = route.trains[0];
+        const backupTrain = route.trains.length > 1 ? route.trains[1] : null;
+
+        // Find and update the train time display
+        const routeOptions = document.querySelectorAll('.route-option');
+        if (routeOptions[index]) {
+          const routeOption = routeOptions[index];
+
+          // Update primary train time
+          const primaryTimeEl = routeOption.querySelector('[data-train="primary-time"]');
+          if (primaryTimeEl) {
+            primaryTimeEl.textContent = primaryTrain.minutes_away;
+            // Add visual update indicator (brief highlight)
+            primaryTimeEl.style.transition = 'background-color 0.3s';
+            primaryTimeEl.style.backgroundColor = '#dbeafe';
+            setTimeout(() => {
+              primaryTimeEl.style.backgroundColor = 'transparent';
+            }, 300);
+          }
+
+          const primaryArrivalEl = routeOption.querySelector('[data-train="primary-arrival"]');
+          if (primaryArrivalEl) {
+            primaryArrivalEl.textContent = primaryTrain.arrival_time;
+            // Add visual update indicator
+            primaryArrivalEl.style.transition = 'color 0.3s';
+            primaryArrivalEl.style.color = '#3b82f6';
+            setTimeout(() => {
+              primaryArrivalEl.style.color = '#64748b';
+            }, 300);
+          }
+
+          // Update backup train time if exists (for safest option)
+          if (backupTrain && route.strategy === 'safest') {
+            const backupTimeEl = routeOption.querySelector('[data-train="backup-time"]');
+            if (backupTimeEl) {
+              backupTimeEl.textContent = backupTrain.minutes_away;
+              // Add visual update indicator (brief highlight)
+              backupTimeEl.style.transition = 'background-color 0.3s';
+              backupTimeEl.style.backgroundColor = '#dbeafe';
+              setTimeout(() => {
+                backupTimeEl.style.backgroundColor = 'transparent';
+              }, 300);
+            }
+
+            const backupArrivalEl = routeOption.querySelector('[data-train="backup-arrival"]');
+            if (backupArrivalEl) {
+              backupArrivalEl.textContent = backupTrain.arrival_time;
+              // Add visual update indicator
+              backupArrivalEl.style.transition = 'color 0.3s';
+              backupArrivalEl.style.color = '#3b82f6';
+              setTimeout(() => {
+                backupArrivalEl.style.color = '#64748b';
+              }, 300);
+            }
+
+            // Update backup train line badge if route changed
+            const backupBadge = routeOption.querySelector('[data-train="backup-badge"]');
+            if (backupBadge && backupBadge.textContent !== backupTrain.route_id) {
+              backupBadge.textContent = backupTrain.route_id;
+              const backupLineColor = getLineColor(backupTrain.route_id);
+              backupBadge.parentElement.style.backgroundColor = backupLineColor;
+            }
+          }
+        }
+      }
+    });
+  }
+
+  function selectRoute(index) {
+    if (!currentRouteData) return;
+    selectedRouteIndex = index;
+    displayRoute(currentRouteData);
+  }
+
+  function closeMapModal() {
+    const mapModal = document.getElementById('route-map-modal');
+    if (mapModal) {
+      mapModal.style.display = 'none';
+      // Stop real-time updates when modal closes
+      if (window.guidanceInterval) {
+        clearInterval(window.guidanceInterval);
+        window.guidanceInterval = null;
+      }
+      // Stop GPS tracking
+      stopHighPrecisionTracking();
+    }
+  }
+
+  function getLineColor(routeId) {
+    if (!routeId) return '#808183';
+    const lineColors = {
+      '1': '#EE352E', '2': '#EE352E', '3': '#EE352E',
+      '4': '#00933C', '5': '#00933C', '6': '#00933C',
+      '7': '#B933AD', 'S': '#808183',
+      'A': '#0039A6', 'C': '#0039A6', 'E': '#0039A6',
+      'B': '#FF6319', 'D': '#FF6319', 'F': '#FF6319', 'M': '#FF6319',
+      'G': '#6CBE45', 'J': '#996633', 'Z': '#996633',
+      'L': '#A7A9AC', 'N': '#FCCC0A', 'Q': '#FCCC0A', 'R': '#FCCC0A', 'W': '#FCCC0A'
+    };
+    const line = routeId.charAt(0);
+    return lineColors[line] || '#808183';
+  }
+
+  let routeMap = null;
+  let routeLayer = null;
+
+  // Initialize map only when needed (lazy initialization)
+  function initRouteMap() {
+    if (!routeMap) {
+      // Create container if it doesn't exist (it should be in the modal)
+      const container = document.getElementById('route-map-modal-container');
+      if (container) {
+        routeMap = L.map('route-map-modal-container').setView([40.7128, -74.0060], 12);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19,
+          attribution: '&copy; OpenStreetMap contributors'
+        }).addTo(routeMap);
+      }
+    }
+    return routeMap;
+  }
+
+  // Generate HTML for route steps
+  function generateRouteSteps(route) {
+    let html = '';
+    const isDarkMode = document.documentElement.getAttribute('data-theme') !== 'light';
+
+    const originName = route.origin_station.name;
+    const destName = route.destination_station.name;
+
+    // Step 1: Walk to station
+    html += `<div onclick="focusWalkSegment('origin')" style="cursor: pointer; display: flex; align-items: start; gap: 12px; margin-bottom: 16px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border-color); transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.1)'" onmouseout="this.style.transform='none'; this.style.boxShadow='none'">`;
+    // Neutral icon for walking (dark grey/black)
+    html += `<div style="flex: 0 0 auto; width: 40px; height: 40px; background: var(--text-primary); color: var(--bg-surface); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">🚶</div>`;
+    html += `<div style="flex: 1;">`;
+    html += `<div style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">Walk to station</div>`;
+    html += `<div style="font-size: 14px; color: var(--text-primary); margin-bottom: 3px;"><strong style="font-weight: 600;">${originName}</strong> <span style="color: var(--text-secondary);">(${route.origin_station.lines.slice(0, 3).join(', ')}${route.origin_station.lines.length > 3 ? '...' : ''})</span></div>`;
+    html += `<div style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">🚶 ${route.origin_station.walk_time} min walk (${route.origin_station.walk_distance.toFixed(2)} km)</div>`;
+    html += `<div style="font-size: 12px; color: var(--accent); margin-top: 4px; font-weight: 600;">👆 Click to navigate</div>`;
+    html += `</div>`;
+    html += `</div>`;
+
+    // Step 2: Subway ride
+    if (route.trains && route.trains.length > 0) {
+      const primaryTrain = route.trains[0];
+      const lineColor = getLineColor(primaryTrain.route_id);
+      const intermediateStations = route.intermediate_stations || [];
+      const stationCount = intermediateStations.length;
+      const stationText = stationCount === 0 ? 'direct' : stationCount === 1 ? '1 station' : `${stationCount} stations`;
+
+      html += `<div style="display: flex; align-items: start; gap: 12px; margin-bottom: 16px; padding: 16px; background: var(--bg-secondary); border-radius: 8px; border: 1px solid var(--border-color);">`;
+      // Replace emoji with Route ID
+      html += `<div style="flex: 0 0 auto; width: 40px; height: 40px; background: ${lineColor}; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; color: white; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">${primaryTrain.route_id}</div>`;
+      html += `<div style="flex: 1;">`;
+      html += `<div style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">Take subway</div>`;
+      // Clean up text: Remove redundant "B train" since icon shows B
+      html += `<div style="font-size: 14px; color: var(--text-primary); margin-bottom: 8px; background: var(--bg-tertiary); padding: 8px 12px; border-radius: 6px; border-left: 4px solid ${lineColor};">Arriving in <strong style="font-weight: 700;">${primaryTrain.minutes_away} min</strong> → ${route.destination_station.name}</div>`;
+      html += `<div style="font-size: 14px; color: var(--text-secondary); font-weight: 500; margin-top: 4px;">⏱️ ${route.total_time.subway} min ride • ${stationText}</div>`;
+
+      // Show intermediate stations
+      if (intermediateStations.length > 0) {
+        html += `<div style="margin-top: 12px; padding: 12px; background: var(--bg-tertiary); border-radius: 6px; font-size: 13px; color: var(--text-secondary);">`;
+        html += `<div style="font-weight: 600; margin-bottom: 6px; color: var(--text-primary);">Stops:</div>`;
+        html += `<div style="display: flex; flex-direction: column; gap: 6px;">`;
+        intermediateStations.forEach((s, idx) => {
+          const isLast = idx === intermediateStations.length - 1;
+          html += `<div style="display: flex; align-items: center; gap: 8px;">`;
+          html += `<div style="width: 8px; height: 8px; border-radius: 50%; background: ${isLast ? lineColor : 'var(--text-muted)'};"></div>`;
+          html += `<span style="color: ${isLast ? 'var(--text-primary)' : 'var(--text-secondary)'}; font-weight: ${isLast ? '600' : '400'};">${s}</span>`;
+          html += `</div>`;
+        });
+        html += `</div>`;
+        html += `</div>`;
+      }
+
+      html += `</div>`;
+      html += `</div>`;
+    }
+
+    // Step 3: Walk from station
+    html += `<div onclick="focusWalkSegment('destination')" style="cursor: pointer; display: flex; align-items: start; gap: 12px; padding: 16px; background: var(--bg-tertiary); border-radius: 8px; border: 1px solid var(--border-color); transition: transform 0.2s, box-shadow 0.2s;" onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 4px 6px rgba(0,0,0,0.1)'" onmouseout="this.style.transform='none'; this.style.boxShadow='none'">`;
+    // Neutral icon for walking (dark grey/black)
+    html += `<div style="flex: 0 0 auto; width: 40px; height: 40px; background: var(--text-primary); color: var(--bg-surface); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">🚶</div>`;
+    html += `<div style="flex: 1;">`;
+    html += `<div style="font-size: 16px; font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">Walk to destination</div>`;
+    html += `<div style="font-size: 14px; color: var(--text-secondary); font-weight: 500;">🚶 ${route.destination_station.walk_time} min walk (${route.destination_station.walk_distance.toFixed(2)} km)</div>`;
+    html += `<div style="font-size: 12px; color: var(--accent); margin-top: 4px; font-weight: 600;">👆 Click to navigate</div>`;
+    html += `</div>`;
+    html += `</div>`;
+
+    return html;
+  }
+
+  function viewRouteOnMap(routeIndex) {
+    if (!currentRouteData) return;
+
+    // Update selected route index
+    selectedRouteIndex = routeIndex;
+    const route = currentRouteData.routes[routeIndex];
+
+    // Create or show map modal
+    let mapModal = document.getElementById('route-map-modal');
+    if (!mapModal) {
+      mapModal = document.createElement('div');
+      mapModal.id = 'route-map-modal';
+      const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+      const modalBg = isDark ? 'var(--bg-secondary)' : 'white';
+      const modalBorder = isDark ? 'var(--border-color)' : '#e2e8f0';
+      const panelBg = isDark ? 'var(--bg-tertiary)' : '#f8fafc';
+
+      mapModal.style.cssText = 'position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.8); z-index: 10000; display: flex; align-items: center; justify-content: center; padding: 20px;';
+      mapModal.innerHTML = `
+          <div style="background: ${modalBg}; width: 100%; height: 100%; max-width: 1200px; border-radius: 12px; display: flex; flex-direction: column; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden;">
+            <div style="padding: 16px; border-bottom: 1px solid ${modalBorder}; display: flex; justify-content: space-between; align-items: center; background: var(--bg-surface);">
+              <h2 style="margin: 0; font-size: 20px; font-weight: 700; color: var(--text-primary);">Route Details</h2>
+              <button onclick="closeMapModal()" style="background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border-color); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s;">✕ Close</button>
+            </div>
+            <div class="modal-content-layout" style="flex: 1; display: flex; overflow: hidden;">
+                <div id="route-steps-panel" style="width: 400px; background: var(--bg-surface); border-right: 1px solid var(--border-color); overflow-y: auto; padding: 20px;">
+                    <!-- Steps injected here -->
+                </div>
+                <div style="flex: 1; position: relative;">
+                    <div id="route-map-modal-container" style="width: 100%; height: 100%;"></div>
+                </div>
+            </div>
+          </div>
+          <style>
+            @media (max-width: 768px) {
+                .modal-content-layout {
+                    flex-direction: column-reverse;
+                }
+                #route-steps-panel {
+                    width: 100% !important;
+                    height: 50%;
+                    border-right: none !important;
+                    border-top: 1px solid var(--border-color);
+                }
+            }
+          </style>
+        `;
+      document.body.appendChild(mapModal);
+    }
+
+    // Inject steps
+    document.getElementById('route-steps-panel').innerHTML = generateRouteSteps(route);
+
+    mapModal.style.display = 'flex';
+
+    // Initialize map if needed
+    setTimeout(() => {
+      initRouteMap();
+      if (routeMap) {
+        routeMap.invalidateSize();
+        displayDetailedRouteOnMap(routeMap, currentRouteData, routeIndex); // Changed from displayRouteOnMap to displayDetailedRouteOnMap
+      }
+    }, 100);
+  }
+
+
+
+  function displayDetailedRouteOnMap(map, routeData, routeIndex) {
+    if (!routeData || !routeData.routes || routeIndex >= routeData.routes.length) return;
+    const route = routeData.routes[routeIndex];
+    if (!route) return;
+    const bounds = [];
+
+    // Origin marker
+    const originMarker = L.marker(routeData.origin.coordinates, {
+      icon: L.divIcon({
+        className: 'custom-marker',
+        html: '<div style="background: #10b981; width: 24px; height: 24px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"></div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      })
+    }).addTo(map);
+    originMarker.bindPopup(`<strong>📍 Origin</strong><br>${routeData.origin.display_name}`);
+    bounds.push(routeData.origin.coordinates);
+
+    // Origin station marker with real-time train info
+    if (route.origin_station) {
+      const primaryTrain = route.trains && route.trains.length > 0 ? route.trains[0] : null;
+      const lineColor = primaryTrain ? getLineColor(primaryTrain.route_id) : '#3b82f6';
+
+      const originStationMarker = L.marker(route.origin_station.coordinates, {
+        icon: L.divIcon({
+          className: 'custom-marker',
+          html: `<div style="background: ${lineColor}; width: 32px; height: 32px; border-radius: 8px; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 14px;">${primaryTrain ? primaryTrain.route_id : '🚇'}</div>`,
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        })
+      }).addTo(map);
+
+      const trainInfo = primaryTrain
+        ? `<strong>${route.origin_station.name}</strong><br>🚇 <strong>${primaryTrain.route_id}</strong> train in <strong>${primaryTrain.minutes_away} min</strong><br>🚶 Walk: ${route.origin_station.walk_time} min (${route.origin_station.walk_distance.toFixed(2)} km)`
+        : `<strong>${route.origin_station.name}</strong><br>🚶 Walk: ${route.origin_station.walk_time} min`;
+      originStationMarker.bindPopup(trainInfo);
+      bounds.push(route.origin_station.coordinates);
+
+      // Draw walking route to entrance (not station center)
+      const originEntrance = route.origin_station.entrance_coordinates || route.origin_station.coordinates;
+      if (route.origin_station.walk_route && route.origin_station.walk_route.length > 0) {
+        L.polyline(route.origin_station.walk_route, {
+          color: '#10b981',
+          weight: 5,
+          opacity: 0.8
+        }).addTo(map);
+      } else {
+        L.polyline([routeData.origin.coordinates, originEntrance], {
+          color: '#10b981',
+          weight: 5,
+          opacity: 0.8,
+          dashArray: '10, 5'
+        }).addTo(map);
+      }
+    }
+
+    // Draw subway line (use actual path if available, otherwise use intermediate stations)
+    if (route.origin_station && route.destination_station) {
+      const primaryTrain = route.trains && route.trains.length > 0 ? route.trains[0] : null;
+      const lineColor = primaryTrain ? getLineColor(primaryTrain.route_id) : '#3b82f6';
+
+      // Use subway_path if available (includes intermediate stations)
+      let subwayPath = route.subway_path;
+      if (!subwayPath || subwayPath.length < 2) {
+        // Fallback: simple path between stations
+        subwayPath = [route.origin_station.coordinates, route.destination_station.coordinates];
+      }
+
+      // Draw the subway path
+      L.polyline(subwayPath, {
+        color: lineColor,
+        weight: 6,
+        opacity: 0.7,
+        dashArray: '15, 5',
+        smoothFactor: 1.0  // Smooth the line
+      }).addTo(map);
+    }
+
+    // Destination station marker
+    if (route.destination_station) {
+      const destStationMarker = L.marker(route.destination_station.coordinates, {
+        icon: L.divIcon({
+          className: 'custom-marker',
+          html: '<div style="background: #3b82f6; width: 24px; height: 24px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"></div>',
+          iconSize: [24, 24],
+          iconAnchor: [12, 12]
+        })
+      }).addTo(map);
+      destStationMarker.bindPopup(`<strong>🎯 ${route.destination_station.name}</strong><br>🚶 Walk: ${route.destination_station.walk_time} min (${route.destination_station.walk_distance.toFixed(2)} km)`);
+      bounds.push(route.destination_station.coordinates);
+
+      // Draw walking route from entrance (not station center)
+      const destEntrance = route.destination_station.entrance_coordinates || route.destination_station.coordinates;
+      if (route.destination_station.walk_route && route.destination_station.walk_route.length > 0) {
+        L.polyline(route.destination_station.walk_route, {
+          color: '#10b981',
+          weight: 5,
+          opacity: 0.8
+        }).addTo(map);
+      } else {
+        L.polyline([destEntrance, routeData.destination.coordinates], {
+          color: '#10b981',
+          weight: 5,
+          opacity: 0.8,
+          dashArray: '10, 5'
+        }).addTo(map);
+      }
+    }
+
+    // Destination marker
+    const destMarker = L.marker(routeData.destination.coordinates, {
+      icon: L.divIcon({
+        className: 'custom-marker',
+        html: '<div style="background: #ef4444; width: 24px; height: 24px; border-radius: 50%; border: 3px solid white; box-shadow: 0 2px 8px rgba(0,0,0,0.3);"></div>',
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+      })
+    }).addTo(map);
+    destMarker.bindPopup(`<strong>🎯 Destination</strong><br>${routeData.destination.display_name}`);
+    bounds.push(routeData.destination.coordinates);
+
+    // Fit map to show entire route
+    if (bounds.length > 0) {
+      map.fitBounds(bounds, { padding: [50, 50] });
+    }
+  }
+
+  function updateGuidancePanel(route) {
+    const panel = document.getElementById('route-guidance-panel');
+    if (!panel || !route || !route.origin_station || !route.destination_station) return;
+
+    const primaryTrain = route.trains && route.trains.length > 0 ? route.trains[0] : null;
+    const backupTrain = route.trains && route.trains.length > 1 ? route.trains[1] : null;
+    const lineColor = primaryTrain ? getLineColor(primaryTrain.route_id) : '#3b82f6';
+    const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+    const stepBg = isDark ? 'var(--bg-secondary)' : 'white';
+    const textColor = isDark ? 'var(--text-primary)' : '#0f172a';
+    const mutedColor = isDark ? 'var(--text-muted)' : '#64748b';
+
+    let html = `<div style="margin-bottom: 16px;">`;
+    html += `<h3 style="margin: 0 0 12px 0; font-size: 18px; font-weight: 700; color: var(--text-primary);">Real-Time Guidance</h3>`;
+
+    // Step 1: Walk to station
+    html += `<div style="background: ${stepBg}; padding: 12px; border-radius: 8px; margin-bottom: 12px; border-left: 4px solid var(--success);">`;
+    html += `<div style="font-size: 12px; font-weight: 600; color: ${mutedColor}; margin-bottom: 4px;">STEP 1: Walk to Station</div>`;
+    html += `<div style="font-size: 14px; font-weight: 700; color: ${textColor}; margin-bottom: 4px;">${route.origin_station.name}</div>`;
+    html += `<div style="font-size: 12px; color: ${mutedColor};">🚶 ${route.origin_station.walk_time} min • ${route.origin_station.walk_distance.toFixed(2)} km</div>`;
+    html += `</div>`;
+
+    // Step 2: Take subway
+    if (primaryTrain) {
+      const intermediateStations = route.intermediate_stations || [];
+      const stationCount = intermediateStations.length;
+      html += `<div style="background: ${stepBg}; padding: 12px; border-radius: 8px; margin-bottom: 12px; border-left: 4px solid ${lineColor};">`;
+      html += `<div style="font-size: 12px; font-weight: 600; color: ${mutedColor}; margin-bottom: 4px;">STEP 2: Take Subway</div>`;
+      html += `<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">`;
+      html += `<div style="width: 32px; height: 32px; background: ${lineColor}; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 16px;">${primaryTrain.route_id}</div>`;
+      html += `<div style="flex: 1;">`;
+      html += `<div style="font-size: 16px; font-weight: 700; color: ${textColor};">${primaryTrain.minutes_away} min</div>`;
+      html += `<div style="font-size: 11px; color: ${mutedColor};">Arrives at ${primaryTrain.arrival_time}</div>`;
+      html += `</div>`;
+      html += `</div>`;
+      html += `<div style="font-size: 12px; color: ${mutedColor}; margin-bottom: 4px;">⏱️ ${route.total_time.subway} min ride • ${stationCount === 0 ? 'direct' : stationCount === 1 ? '1 station' : `${stationCount} stations`}</div>`;
+
+      // Show intermediate stations
+      if (intermediateStations.length > 0 && intermediateStations.length <= 8) {
+        html += `<div style="margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border-radius: 6px; border-left: 3px solid ${lineColor};">`;
+        html += `<div style="font-size: 11px; font-weight: 600; color: ${textColor}; margin-bottom: 4px;">Stations:</div>`;
+        html += `<div style="font-size: 11px; color: ${mutedColor}; line-height: 1.6;">`;
+        intermediateStations.forEach((s, idx) => {
+          const isLast = idx === intermediateStations.length - 1;
+          html += `<span style="color: ${isLast ? lineColor : mutedColor}; font-weight: ${isLast ? '700' : '500'};">${s}</span>`;
+          if (!isLast) html += ' → ';
+        });
+        html += `</div>`;
+        html += `</div>`;
+      } else if (intermediateStations.length > 8) {
+        html += `<div style="margin-top: 8px; padding: 8px; background: var(--bg-tertiary); border-radius: 6px; border-left: 3px solid ${lineColor};">`;
+        html += `<div style="font-size: 11px; font-weight: 600; color: ${textColor}; margin-bottom: 4px;">Stations:</div>`;
+        html += `<div style="font-size: 11px; color: ${mutedColor};">${intermediateStations.slice(0, 2).join(' → ')} → ... → ${intermediateStations[intermediateStations.length - 1]}</div>`;
+        html += `</div>`;
+      }
+
+      html += `</div>`;
+
+      if (backupTrain && route.strategy === 'safest') {
+        const backupLineColor = getLineColor(backupTrain.route_id);
+        html += `<div style="background: var(--bg-tertiary); padding: 10px; border-radius: 6px; margin-bottom: 12px; border: 1px solid ${backupLineColor};">`;
+        html += `<div style="font-size: 11px; font-weight: 600; color: ${mutedColor}; margin-bottom: 4px;">Backup Train</div>`;
+        html += `<div style="display: flex; align-items: center; gap: 6px;">`;
+        html += `<div style="width: 28px; height: 28px; background: ${backupLineColor}; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 14px;">${backupTrain.route_id}</div>`;
+        html += `<div style="font-size: 14px; font-weight: 700; color: ${textColor};">${backupTrain.minutes_away} min</div>`;
+        html += `</div>`;
+        html += `</div>`;
+      }
+    }
+
+    // Step 3: Walk to destination
+    html += `<div style="background: ${stepBg}; padding: 12px; border-radius: 8px; border-left: 4px solid var(--success);">`;
+    html += `<div style="font-size: 12px; font-weight: 600; color: ${mutedColor}; margin-bottom: 4px;">STEP 3: Walk to Destination</div>`;
+    html += `<div style="font-size: 12px; color: ${mutedColor};">🚶 ${route.destination_station.walk_time} min • ${route.destination_station.walk_distance.toFixed(2)} km</div>`;
+    html += `</div>`;
+
+    // Delays - show specific line names clearly
+    if (route.delays && route.delays.length > 0) {
+      // Group delays by line
+      const delaysByLine = {};
+      route.delays.forEach(delay => {
+        const line = delay.line;
+        if (!delaysByLine[line]) {
+          delaysByLine[line] = [];
+        }
+        delaysByLine[line].push(delay.status);
+      });
+
+      html += `<div style="background: rgba(245, 158, 11, ${isDark ? '0.2' : '0.1'}); padding: 12px; border-radius: 8px; margin-top: 12px; border-left: 4px solid var(--warning);">`;
+      html += `<div style="font-size: 12px; font-weight: 600; color: var(--warning); margin-bottom: 4px;">⚠️ Delays</div>`;
+      Object.keys(delaysByLine).forEach(line => {
+        const statuses = [...new Set(delaysByLine[line])];
+        html += `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;"><strong>Line ${line}:</strong> ${statuses.join(', ')}</div>`;
+      });
+      html += `</div>`;
+    }
+
+    html += `</div>`;
+    panel.innerHTML = html;
+  }
+
+  function refreshRouteGuidance(map, routeData, routeIndex) {
+    // Check if modal is still open
+    const mapModal = document.getElementById('route-map-modal');
+    if (!mapModal || mapModal.style.display === 'none') {
+      // Modal closed, stop refreshing
+      if (window.guidanceInterval) {
+        clearInterval(window.guidanceInterval);
+        window.guidanceInterval = null;
+      }
+      return;
+    }
+
+    // Refresh train times
+    const originInput = document.getElementById('origin');
+    const destInput = document.getElementById('destination');
+    if (!originInput || !destInput) return;
+
+    let origin = originInput.value;
+    let destination = destInput.value;
+
+    if (originInput.dataset.lat && originInput.dataset.lon) {
+      origin = `${originInput.dataset.lat},${originInput.dataset.lon}`;
+    }
+    if (destInput.dataset.lat && destInput.dataset.lon) {
+      destination = `${destInput.dataset.lat},${destInput.dataset.lon}`;
+    }
+
+    fetch('/api/route/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ origin, destination })
+    })
+      .then(async response => {
+        const contentType = response.headers.get('content-type');
+        const isJson = contentType && contentType.includes('application/json');
+        if (isJson) {
+          return response.json();
+        } else {
+          const text = await response.text();
+          throw new Error('Invalid response format');
+        }
+      })
+      .then(data => {
+        if (!data.error && data.routes && data.routes.length > routeIndex) {
+          currentRouteData = data;
+          displayDetailedRouteOnMap(map, data, routeIndex);
+          updateGuidancePanel(data.routes[routeIndex]);
+        }
+      })
+      .catch(err => console.error('Error refreshing guidance:', err));
+  }
+
+
+
+  let watchId = null;
+  let userMarker = null;
+
+  function focusWalkSegment(segmentType) {
+    if (!currentRouteData || !routeMap) return;
+    const route = currentRouteData.routes[selectedRouteIndex];
+    if (!route) return;
+
+    let path = [];
+    let entrance = null;
+    let target = null;
+
+    if (segmentType === 'origin') {
+      // Walk from user origin to station entrance
+      entrance = route.origin_station.entrance_coordinates || route.origin_station.coordinates;
+      target = currentRouteData.origin.coordinates;
+      if (route.origin_station.walk_route) {
+        path = route.origin_station.walk_route;
+      } else {
+        path = [target, entrance];
+      }
+    } else {
+      // Walk from station entrance to destination
+      entrance = route.destination_station.entrance_coordinates || route.destination_station.coordinates;
+      target = currentRouteData.destination.coordinates;
+      if (route.destination_station.walk_route) {
+        path = route.destination_station.walk_route;
+      } else {
+        path = [entrance, target];
+      }
+    }
+
+    // Zoom to the path
+    const bounds = L.latLngBounds(path);
+    routeMap.fitBounds(bounds, { padding: [50, 50], maxZoom: 18 });
+
+    // Start GPS tracking
+    startHighPrecisionTracking();
+  }
+
+  function startHighPrecisionTracking() {
+    if (!navigator.geolocation) {
+      alert("Geolocation is not supported by your browser.");
+      return;
+    }
+
+    if (watchId) {
+      // Already tracking
+      return;
+    }
+
+    // Add user marker if not exists
+    if (!userMarker && routeMap) {
+      userMarker = L.marker([0, 0], {
+        icon: L.divIcon({
+          className: 'user-location-marker',
+          html: '<div style="width: 20px; height: 20px; background: #2563eb; border: 3px solid white; border-radius: 50%; box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.3);"></div>',
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
+        })
+      }).addTo(routeMap);
+    }
+
+    watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+        const accuracy = position.coords.accuracy;
+
+        if (userMarker) {
+          userMarker.setLatLng([lat, lon]);
+          userMarker.bindPopup(`You are here (Accuracy: ${Math.round(accuracy)}m)`).openPopup();
+        }
+      },
+      (error) => {
+        console.error("Error getting location:", error);
+      },
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 5000
+      }
+    );
+  }
+
+  function stopHighPrecisionTracking() {
+    if (watchId) {
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+    }
+    if (userMarker && routeMap) {
+      routeMap.removeLayer(userMarker);
+      userMarker = null;
+    }
+  }
+
+</script>
+{% endblock %}
