@@ -1,30 +1,31 @@
 /* Design System & Variables */
 :root {
     /* Core Colors - Modern & Premium */
-    --primary: #0069D9; /* Vibrant Blue */
+    --primary: #0069D9;
+    /* Vibrant Blue */
     --primary-hover: #0056b3;
     --secondary: #6c757d;
     --success: #28a745;
     --danger: #dc3545;
     --warning: #ffc107;
     --info: #17a2b8;
-    
+
     /* Backgrounds & Surfaces */
     --bg-body: #f8f9fa;
     --bg-surface: #ffffff;
     --bg-surface-hover: #f1f3f5;
-    
+
     /* Text Colors */
     --text-main: #212529;
     --text-muted: #6c757d;
     --text-light: #ffffff;
-    
+
     /* Borders & Shadows */
     --border-color: #dee2e6;
-    --shadow-sm: 0 2px 4px rgba(0,0,0,0.05);
-    --shadow-md: 0 4px 6px rgba(0,0,0,0.07);
-    --shadow-lg: 0 10px 15px rgba(0,0,0,0.1);
-    
+    --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.07);
+    --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.1);
+
     /* Typography */
     --font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     --radius-sm: 4px;
@@ -42,8 +43,8 @@
     --text-main: #e9ecef;
     --text-muted: #adb5bd;
     --border-color: #343a40;
-    --shadow-sm: 0 2px 4px rgba(0,0,0,0.2);
-    --shadow-md: 0 4px 6px rgba(0,0,0,0.3);
+    --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.3);
 }
 
 /* Reset & Base */
@@ -78,14 +79,37 @@ a:hover {
     padding: 0 1rem;
 }
 
-.flex { display: flex; }
-.flex-col { flex-direction: column; }
-.items-center { align-items: center; }
-.justify-between { justify-content: space-between; }
-.gap-2 { gap: 0.5rem; }
-.gap-4 { gap: 1rem; }
-.mt-4 { margin-top: 1rem; }
-.mb-4 { margin-bottom: 1rem; }
+.flex {
+    display: flex;
+}
+
+.flex-col {
+    flex-direction: column;
+}
+
+.items-center {
+    align-items: center;
+}
+
+.justify-between {
+    justify-content: space-between;
+}
+
+.gap-2 {
+    gap: 0.5rem;
+}
+
+.gap-4 {
+    gap: 1rem;
+}
+
+.mt-4 {
+    margin-top: 1rem;
+}
+
+.mb-4 {
+    margin-bottom: 1rem;
+}
 
 /* Header */
 header {
@@ -186,10 +210,25 @@ header {
     text-transform: uppercase;
 }
 
-.badge-success { background-color: rgba(40, 167, 69, 0.1); color: var(--success); }
-.badge-warning { background-color: rgba(255, 193, 7, 0.1); color: var(--warning); }
-.badge-danger { background-color: rgba(220, 53, 69, 0.1); color: var(--danger); }
-.badge-info { background-color: rgba(23, 162, 184, 0.1); color: var(--info); }
+.badge-success {
+    background-color: rgba(40, 167, 69, 0.1);
+    color: var(--success);
+}
+
+.badge-warning {
+    background-color: rgba(255, 193, 7, 0.1);
+    color: var(--warning);
+}
+
+.badge-danger {
+    background-color: rgba(220, 53, 69, 0.1);
+    color: var(--danger);
+}
+
+.badge-info {
+    background-color: rgba(23, 162, 184, 0.1);
+    color: var(--info);
+}
 
 /* Map Container */
 #map {
@@ -201,18 +240,140 @@ header {
 }
 
 /* Animations */
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+@keyframes slideUpFade {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
-.animate-fade-in {
-    animation: fadeIn 0.4s ease-out forwards;
+.animate-slide-up {
+    animation: slideUpFade 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Route Card Styles */
+.route-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: 0;
+    margin-bottom: 1rem;
+    transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s;
+    overflow: hidden;
+    cursor: pointer;
+    position: relative;
+}
+
+.route-card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+    border-color: var(--primary);
+}
+
+.route-card-header {
+    padding: 1.25rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border-color);
+    background: var(--bg-surface);
+}
+
+.route-card-body {
+    padding: 1.25rem;
+}
+
+.route-card-footer {
+    padding: 1rem 1.25rem;
+    background: var(--bg-surface-hover);
+    border-top: 1px solid var(--border-color);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+/* Typography Utilities */
+.text-display {
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+
+.text-xl {
+    font-size: 1.25rem;
+    font-weight: 700;
+}
+
+.text-lg {
+    font-size: 1.125rem;
+    font-weight: 600;
+}
+
+.text-sm {
+    font-size: 0.875rem;
+}
+
+.text-xs {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+/* Input Polish */
+.input-wrapper {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.input-icon-btn {
+    position: absolute;
+    right: 8px;
+    padding: 6px;
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-md);
+    color: var(--primary);
+    cursor: pointer;
+    transition: background 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 600;
+    font-size: 0.875rem;
+}
+
+.input-icon-btn:hover {
+    background: var(--bg-surface-hover);
+}
+
+/* Dark Mode Refinements */
+[data-theme="dark"] .route-card-footer {
+    background: rgba(255, 255, 255, 0.03);
 }
 
 /* Responsive */
 @media (max-width: 768px) {
-    .container { padding: 0 0.75rem; }
-    #map { height: 50vh; }
-    .hide-mobile { display: none; }
+    .container {
+        padding: 0 0.75rem;
+    }
+
+    #map {
+        height: 50vh;
+    }
+
+    .hide-mobile {
+        display: none;
+    }
+
+    .text-display {
+        font-size: 1.75rem;
+    }
 }

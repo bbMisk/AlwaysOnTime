@@ -72,26 +72,54 @@ def fetch_gtfs_stations():
                 for row in reader:
                     trip_routes[row['trip_id']] = row['route_id']
             
-            # Now scan stop_times.txt to associate routes with stations
+            # Also build line sequences (ordered list of stations per line)
+            # We'll use the longest trip for each route as the representative sequence
+            line_sequences = {}
+            trip_stop_counts = {}
+            
+            # Reset file pointer for second pass
+            z.open('stop_times.txt').close()
+            
             with z.open('stop_times.txt') as f:
                 stop_times_content = io.TextIOWrapper(f, encoding='utf-8')
                 reader = csv.DictReader(stop_times_content)
                 
+                current_trip_id = None
+                current_sequence = []
+                
                 for row in reader:
                     trip_id = row['trip_id']
                     stop_id = row['stop_id']
+                    stop_seq = int(row['stop_sequence'])
                     
-                    # Get parent station ID (usually first 3 chars for MTA, e.g. 101N -> 101)
-                    # But some are different. Let's try to find the parent in our stations dict.
-                    # MTA convention: parent is stop_id without N/S suffix
+                    if trip_id != current_trip_id:
+                        # Process previous trip
+                        if current_trip_id and current_trip_id in trip_routes:
+                            route_id = trip_routes[current_trip_id]
+                            if route_id not in line_sequences or len(current_sequence) > len(line_sequences[route_id]):
+                                line_sequences[route_id] = current_sequence
+                        
+                        current_trip_id = trip_id
+                        current_sequence = []
+                    
+                    # Get parent station ID
                     parent_id = stop_id
                     if stop_id not in stations:
                         if stop_id.endswith('N') or stop_id.endswith('S'):
                             parent_id = stop_id[:-1]
                     
-                    if parent_id in stations and trip_id in trip_routes:
-                        route_id = trip_routes[trip_id]
-                        stations[parent_id]['lines'].add(route_id)
+                    if parent_id in stations:
+                        current_sequence.append(parent_id)
+                        
+                        if trip_id in trip_routes:
+                            route_id = trip_routes[trip_id]
+                            stations[parent_id]['lines'].add(route_id)
+                
+                # Process last trip
+                if current_trip_id and current_trip_id in trip_routes:
+                    route_id = trip_routes[current_trip_id]
+                    if route_id not in line_sequences or len(current_sequence) > len(line_sequences[route_id]):
+                        line_sequences[route_id] = current_sequence
             
             # Convert sets to sorted strings and format for return
             result = []
@@ -101,7 +129,7 @@ def fetch_gtfs_stations():
                     result.append(s)
             
             logger.info(f"Successfully parsed {len(result)} active stations.")
-            return result
+            return result, line_sequences
 
     except Exception as e:
         logger.error(f"Error fetching GTFS data: {e}")

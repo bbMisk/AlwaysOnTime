@@ -29,8 +29,20 @@ def _mta_session(require_key=False):
         return None
     return s
 
+# Cache for GTFS feeds (feed_path -> (feed, timestamp))
+_feed_cache = {}
+_feed_cache_timeout = 30  # Cache for 30 seconds
+
 def _fetch_gtfs_feed(feed_path):
     """Fetch and parse a GTFS-realtime feed from public MTA endpoints."""
+    import time
+    
+    # Check cache
+    if feed_path in _feed_cache:
+        feed, timestamp = _feed_cache[feed_path]
+        if time.time() - timestamp < _feed_cache_timeout:
+            return feed
+            
     # These are public endpoints, no API key needed
     url = f"{MTA_FEED_BASE}/{feed_path}"
     
@@ -39,6 +51,9 @@ def _fetch_gtfs_feed(feed_path):
         response.raise_for_status()
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(response.content)
+        
+        # Update cache
+        _feed_cache[feed_path] = (feed, time.time())
         return feed
     except Exception as e:
         # Log error for debugging but don't fail completely

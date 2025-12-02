@@ -5,46 +5,45 @@
     Route' }}</h1>
 
   <form id="route-form" onsubmit="planRoute(event)">
-    <div style="margin-bottom: 16px; position: relative;">
-      <label for="origin" style="color: var(--text-primary);"><strong>{{ t('From') or 'From' }}:</strong></label>
-      <div style="position: relative;">
-        <input type="text" id="origin" name="origin"
-          placeholder="{{ t('Enter starting address or location') or 'Enter starting address or location' }}" required
-          autocomplete="off"
-          style="width: 100%; padding: 10px 120px 10px 12px; margin-top: 4px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; background: var(--bg-tertiary); color: var(--text-primary);"
-          oninput="searchLocations('origin', this.value)" onfocus="showSuggestions('origin')"
-          onblur="setTimeout(() => hideSuggestions('origin'), 200)">
-        <button type="button" onclick="useCurrentLocation('origin')"
-          style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); padding: 6px 10px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; z-index: 10;">
-          📍 {{ t('Use My Location') or 'Use My Location' }}
+    <div style="margin-bottom: 16px;">
+      <label for="origin" style="display: block; margin-bottom: 6px; color: var(--text-primary); font-weight: 600;">{{
+        t('From') or 'From' }}</label>
+      <div class="input-wrapper">
+        <input type="text" id="origin" name="origin" class="input"
+          placeholder="{{ t('Enter starting address') or 'Enter starting address' }}" required autocomplete="off"
+          oninput="searchLocations('origin', this.value); updateLocationButtonState('origin')"
+          onfocus="showSuggestions('origin')" onblur="setTimeout(() => hideSuggestions('origin'), 200)">
+        <button type="button" class="input-icon-btn" onclick="useCurrentLocation('origin')" title="Use My Location">
+          📍 <span class="hide-mobile">Current Location</span>
         </button>
         <div id="origin-suggestions" class="suggestions-dropdown" style="display: none;"></div>
       </div>
     </div>
-    <div style="margin-bottom: 16px; position: relative;">
-      <label for="destination" style="color: var(--text-primary);"><strong>{{ t('To') or 'To' }}:</strong></label>
-      <div style="position: relative;">
-        <input type="text" id="destination" name="destination"
-          placeholder="{{ t('Enter destination address or location') or 'Enter destination address or location' }}"
-          required autocomplete="off"
-          style="width: 100%; padding: 10px 120px 10px 12px; margin-top: 4px; border: 1px solid var(--border-color); border-radius: 4px; box-sizing: border-box; background: var(--bg-tertiary); color: var(--text-primary);"
-          oninput="searchLocations('destination', this.value)" onfocus="showSuggestions('destination')"
-          onblur="setTimeout(() => hideSuggestions('destination'), 200)">
-        <button type="button" onclick="useCurrentLocation('destination')"
-          style="position: absolute; right: 8px; top: 50%; transform: translateY(-50%); padding: 6px 10px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; z-index: 10;">
-          📍 {{ t('Use My Location') or 'Use My Location' }}
+
+    <div style="margin-bottom: 24px;">
+      <label for="destination"
+        style="display: block; margin-bottom: 6px; color: var(--text-primary); font-weight: 600;">{{ t('To') or 'To'
+        }}</label>
+      <div class="input-wrapper">
+        <input type="text" id="destination" name="destination" class="input"
+          placeholder="{{ t('Enter destination') or 'Enter destination' }}" required autocomplete="off"
+          oninput="searchLocations('destination', this.value); updateLocationButtonState('destination')"
+          onfocus="showSuggestions('destination')" onblur="setTimeout(() => hideSuggestions('destination'), 200)">
+        <button type="button" class="input-icon-btn" onclick="useCurrentLocation('destination')"
+          title="Use My Location">
+          📍 <span class="hide-mobile">Current Location</span>
         </button>
         <div id="destination-suggestions" class="suggestions-dropdown" style="display: none;"></div>
       </div>
     </div>
-    <button type="submit"
-      style="padding: 12px 20px; background: var(--accent); color: white; border: none; border-radius: 4px; cursor: pointer; width: 100%; font-weight: 600; font-size: 16px;">
+
+    <button type="submit" class="btn btn-primary" style="width: 100%; padding: 14px; font-size: 1.1rem;">
       {{ t('Plan Route') or 'Plan Route' }}
     </button>
   </form>
 </section>
 
-<section id="route-results" style="display: none; max-width: 900px; margin: 32px auto 0;">
+<section id="route-results" style="display: none; max-width: 800px; margin: 40px auto 0;" class="animate-slide-up">
   <div id="route-info"></div>
 </section>
 
@@ -54,7 +53,7 @@
     top: 100%;
     left: 0;
     right: 0;
-    background: var(--bg-tertiary);
+    background: var(--bg-surface);
     border: 1px solid var(--border-color);
     border-top: none;
     border-radius: 0 0 4px 4px;
@@ -183,7 +182,8 @@
 
     dropdown.innerHTML = results.map(result => `
         <div class="suggestion-item" onclick="selectLocation('${field}', '${result.display_name.replace(/'/g, "\\'")}', ${result.latitude}, ${result.longitude})">
-          <div class="suggestion-name">${result.display_name}</div>
+          <div class="suggestion-name">${result.name || result.display_name}</div>
+          ${result.name && result.address ? `<div class="suggestion-details">${result.address}</div>` : ''}
         </div>
       `).join('');
     dropdown.style.display = 'block';
@@ -208,6 +208,7 @@
     // Store coordinates for later use
     document.getElementById(field).dataset.lat = lat;
     document.getElementById(field).dataset.lon = lon;
+    updateLocationButtonState(field);
   }
 
   function useCurrentLocation(field) {
@@ -231,27 +232,46 @@
         })
           .then(response => response.json())
           .then(data => {
-            const address = data.display_name || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+            const rawAddress = data.display_name || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+            const address = shortenAddress(rawAddress);
             document.getElementById(field).value = address;
             document.getElementById(field).dataset.lat = lat;
             document.getElementById(field).dataset.lon = lon;
             button.disabled = false;
-            button.textContent = '📍 Use My Location';
+            // Reset button content and update state
+            button.innerHTML = '📍 <span class="hide-mobile">Use My Location</span>';
+            updateLocationButtonState(field);
           })
           .catch(error => {
             document.getElementById(field).value = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
             document.getElementById(field).dataset.lat = lat;
             document.getElementById(field).dataset.lon = lon;
             button.disabled = false;
-            button.textContent = '📍 Use My Location';
+            button.innerHTML = '📍 <span class="hide-mobile">Use My Location</span>';
+            updateLocationButtonState(field);
           });
+
       },
       (error) => {
         showError('Could not get your location. Please enable location services or enter an address manually.');
         button.disabled = false;
-        button.textContent = '📍 Use My Location';
+        button.innerHTML = '📍 <span class="hide-mobile">Use My Location</span>';
       }
     );
+  }
+
+  function updateLocationButtonState(field) {
+    const input = document.getElementById(field);
+    const wrapper = input.closest('.input-wrapper');
+    const button = wrapper.querySelector('.input-icon-btn');
+    const textSpan = button.querySelector('span');
+
+    if (input.value && input.value.length > 0) {
+      if (textSpan) textSpan.style.display = 'none';
+      button.title = "Use My Location";
+    } else {
+      if (textSpan) textSpan.style.display = 'inline';
+    }
   }
 
   function planRoute(event) {
@@ -370,10 +390,11 @@
       destDisplay = 'Destination';
     }
 
-    html += `<div style="background: var(--bg-tertiary); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border-color); font-size: 14px;">`;
-    html += `<div style="display: flex; gap: 16px; align-items: center;"><span style="color: var(--text-muted);">📍</span><span style="color: var(--text-primary);">${originDisplay}</span></div>`;
-    html += `<div style="display: flex; gap: 16px; align-items: center; margin-top: 6px;"><span style="color: var(--text-muted);">🎯</span><span style="color: var(--text-primary);">${destDisplay}</span></div>`;
-    html += `</div>`;
+    // Address summary removed as per user request
+    // html += `<div style="background: var(--bg-tertiary); padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; border: 1px solid var(--border-color); font-size: 14px;">`;
+    // html += `<div style="display: flex; gap: 16px; align-items: center;"><span style="color: var(--text-muted);">📍</span><span style="color: var(--text-primary);">${originDisplay}</span></div>`;
+    // html += `<div style="display: flex; gap: 16px; align-items: center; margin-top: 6px;"><span style="color: var(--text-muted);">🎯</span><span style="color: var(--text-primary);">${destDisplay}</span></div>`;
+    // html += `</div>`;
 
     // Strategy colors and icons - adjusted for better dark mode visibility
     const isDarkMode = document.documentElement.getAttribute('data-theme') !== 'light';
@@ -400,103 +421,147 @@
       const isSelected = index === selectedRouteIndex;
       const strategy = strategyStyles[route.strategy] || strategyStyles['safest'];
 
-      const bgColor = isSelected ? strategy.bg : 'var(--bg-secondary)';
-      const borderColor = isSelected ? strategy.color : 'var(--border-color)';
-      html += `<div class="route-option ${isSelected ? 'selected' : ''}" onclick="viewRouteOnMap(${index})" style="margin: 12px 0; padding: 16px; background: ${bgColor}; border: 2px solid ${borderColor}; border-left: 4px solid ${strategy.color}; border-radius: 8px; cursor: pointer; transition: all 0.2s; box-shadow: ${isSelected ? '0 2px 8px rgba(0,0,0,0.2)' : '0 1px 3px rgba(0,0,0,0.1)'};">`;
-      html += `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">`;
+      const bgColor = isSelected ? strategy.bg : 'var(--bg-surface)';
+      const borderColor = isSelected ? strategy.color : 'transparent';
+
+      html += `<div class="route-card ${isSelected ? 'selected' : ''}" onclick="viewRouteOnMap(${index})" style="border-color: ${isSelected ? strategy.color : 'var(--border-color)'}; box-shadow: ${isSelected ? '0 0 0 2px ' + strategy.color + '20' : ''};">`;
+
+      // Header
+      html += `<div class="route-card-header">`;
       html += `<div style="display: flex; align-items: center; gap: 10px;">`;
-      html += `<span style="font-size: 20px;">${strategy.icon}</span>`;
-      html += `<strong style="font-size: 18px; color: ${strategy.color}; font-weight: 700;">${route.strategy_name}</strong>`;
-      if (route.direct_line) {
-        html += `<span style="background: #10b981; color: white; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 8px;">Direct</span>`;
-      }
-      html += `</div>`;
-      html += `<div style="display: flex; align-items: center; gap: 8px;">`;
-      html += `<strong style="font-size: 20px; color: ${strategy.color}; font-weight: 700;">${route.total_time.total} min</strong>`;
-      html += `</div>`;
+      html += `<span style="font-size: 1.25rem;">${strategy.icon}</span>`;
+      html += `<span class="text-lg" style="color: ${strategy.color}">${route.strategy_name}</span>`;
       html += `</div>`;
 
-      // Show route-specific delays if any (compact, specific lines with clear names)
+      // Transfers
+      const transferCount = route.direct_line ? 0 : 1;
+      if (transferCount === 0) {
+        html += `<span class="badge badge-success">Direct</span>`;
+      } else {
+        html += `<span class="badge badge-warning">${transferCount === 1 ? '1 Transfer' : transferCount + ' Transfers'}</span>`;
+      }
+      html += `</div>`; // End Header
+
+      // Body
+      html += `<div class="route-card-body">`;
+
+      // Delays (if any)
       if (route.delays && route.delays.length > 0) {
-        // Group delays by line and show each line's status clearly
         const delaysByLine = {};
         route.delays.forEach(delay => {
           const line = delay.line;
-          if (!delaysByLine[line]) {
-            delaysByLine[line] = [];
-          }
+          if (!delaysByLine[line]) delaysByLine[line] = [];
           delaysByLine[line].push(delay.status);
         });
 
-        html += `<div style="margin: 10px 0; padding: 10px 12px; background: rgba(245, 158, 11, ${isDarkMode ? '0.2' : '0.1'}); border-left: 4px solid var(--warning); border-radius: 6px; font-size: 13px; font-weight: 600;">`;
-        html += `<span style="color: var(--warning); font-weight: 700;">⚠️ Delays:</span> `;
-        html += Object.keys(delaysByLine).map(line => {
-          const statuses = [...new Set(delaysByLine[line])];
-          return `<span style="color: var(--warning); font-weight: 700;">Line ${line}</span><span style="color: var(--text-secondary);"> (${statuses.join(', ')})</span>`;
-        }).join(', ');
-        html += `</div>`;
+        html += `<div style="margin-bottom: 12px; padding: 8px 12px; background: rgba(245, 158, 11, 0.1); border-radius: var(--radius-sm); display: flex; gap: 8px; align-items: center;">`;
+        html += `<span style="font-size: 12px;">⚠️</span>`;
+        html += `<div style="font-size: 12px; color: var(--warning); font-weight: 600;">`;
+        html += Object.keys(delaysByLine).map(line => `Line ${line}: ${[...new Set(delaysByLine[line])].join(', ')}`).join(' • ');
+        html += `</div></div>`;
       }
 
-      // Show live train information prominently FIRST
       if (route.trains && route.trains.length > 0) {
         const primaryTrain = route.trains[0];
-        const backupTrain = route.trains.length > 1 ? route.trains[1] : null;
-
-
         const lineColor = getLineColor(primaryTrain.route_id);
         const walkTime = route.origin_station.walk_time;
         const trainArrivesIn = primaryTrain.minutes_away;
-
-        // Check if train might be missed (arrives before or very close to walk time)
-        const mightMiss = trainArrivesIn < walkTime;
+        const mightMiss = trainArrivesIn <= walkTime;
         const isEstimated = primaryTrain.estimated || false;
-        const warningStyle = mightMiss ? `background: rgba(245, 158, 11, 0.1); border: 2px solid var(--warning);` : '';
 
-        // Use lighter background for better text readability
-        const bgOpacity = isDarkMode ? '0.4' : '0.25';
-        const textBg = isDarkMode ? 'var(--bg-secondary)' : 'rgba(255, 255, 255, 0.8)';
-        html += `<div style="margin: 10px 0; padding: 12px; background: ${textBg}; border: 2px solid ${lineColor}; border-left: 4px solid ${lineColor}; border-radius: 8px; ${warningStyle}">`;
-        html += `<div style="display: flex; align-items: center; gap: 12px;">`;
-        html += `<div style="width: 48px; height: 48px; background: ${lineColor}; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">`;
-        html += `<span style="font-size: 20px; font-weight: 700; color: white;">${primaryTrain.route_id}</span>`;
+        html += `<div style="display: flex; align-items: center; justify-content: space-between;">`;
+
+        // Left: Train Icon & Time
+        html += `<div style="display: flex; align-items: center; gap: 16px;">`;
+        html += `<div style="width: 56px; height: 56px; background: ${lineColor}; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: white; font-weight: 800; font-size: 1.5rem; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">${primaryTrain.route_id}</div>`;
+
+        html += `<div>`;
+        html += `<div class="text-display" style="color: var(--text-primary); display: flex; align-items: baseline;">`;
+        html += `<span data-train="primary-time">${primaryTrain.minutes_away}</span>`;
+        html += `<span class="text-sm" style="color: var(--text-secondary); margin-left: 4px; font-weight: 600;">min</span>`;
         html += `</div>`;
-        html += `<div style="flex: 1; min-width: 0;">`;
-        html += `<div style="font-size: 24px; font-weight: 700; color: var(--text-primary); line-height: 1.3;"><span data-train="primary-time">${primaryTrain.minutes_away}</span><span style="font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-left: 4px;">min</span></div>`;
-        html += `<div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-weight: 500;"><span data-train="primary-arrival">${primaryTrain.arrival_time}</span>${isEstimated ? ' <span style="color: var(--accent); font-weight: 600;">(est.)</span>' : ''}${mightMiss ? ' <span style="color: var(--warning);">⚠️</span>' : ''}</div>`;
+        html += `<div class="text-sm" style="color: var(--text-secondary); margin-top: 2px;">Arrives <span data-train="primary-arrival">${primaryTrain.arrival_time}</span>${isEstimated ? ' (est)' : ''}</div>`;
         html += `</div>`;
         html += `</div>`;
 
-        // Show backup train for safest option (matching primary train style)
+        // Right: Total Time
+        html += `<div style="text-align: right;">`;
+        html += `<div class="text-xl" style="color: var(--text-primary);">${route.total_time.total} <span class="text-sm" style="color: var(--text-secondary); font-weight: 500;">min total</span></div>`;
+        html += `<div class="text-sm" style="color: var(--text-secondary); margin-top: 2px;">${route.origin_station.walk_time} min walk</div>`;
+        html += `</div>`;
 
-        if (backupTrain && route.strategy === 'safest') {
-          const backupLineColor = getLineColor(backupTrain.route_id);
-          const backupEstimated = backupTrain.estimated || false;
+        html += `</div>`; // End Flex
 
-          // Use lighter background for better text readability
-          const backupTextBg = isDarkMode ? 'var(--bg-secondary)' : 'rgba(255, 255, 255, 0.8)';
-          html += `<div style="margin-top: 8px; padding: 12px; background: ${backupTextBg}; border: 2px solid ${backupLineColor}; border-left: 4px solid ${backupLineColor}; border-radius: 8px;">`;
-          html += `<div style="display: flex; align-items: center; gap: 12px;">`;
-          html += `<div style="width: 48px; height: 48px; background: ${backupLineColor}; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 2px 4px rgba(0,0,0,0.2);">`;
-          html += `<span data-train="backup-badge" style="font-size: 20px; font-weight: 700; color: white;">${backupTrain.route_id}</span>`;
-          html += `</div>`;
-          html += `<div style="flex: 1; min-width: 0;">`;
-          html += `<div style="font-size: 11px; color: var(--text-secondary); margin-bottom: 2px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;">Backup</div>`;
-          html += `<div style="font-size: 24px; font-weight: 700; color: var(--text-primary); line-height: 1.3;"><span data-train="backup-time">${backupTrain.minutes_away}</span><span style="font-size: 14px; font-weight: 600; color: var(--text-secondary); margin-left: 4px;">min</span></div>`;
-          html += `<div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px; font-weight: 500;"><span data-train="backup-arrival">${backupTrain.arrival_time}</span>${backupEstimated ? ' <span style="color: var(--accent); font-weight: 600;">(est.)</span>' : ''}</div>`;
-          html += `</div>`;
-          html += `</div>`;
+        // Risk Warning
+        if (mightMiss) {
+          html += `<div style="margin-top: 12px; padding: 8px 12px; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 8px;">`;
+          html += `<span style="font-size: 14px;">🏃</span>`;
+          html += `<span style="font-size: 12px; font-weight: 700; color: var(--danger); text-transform: uppercase;">Risk of Missing</span>`;
+          html += `<span style="font-size: 12px; color: var(--text-secondary);">Train departs in ${trainArrivesIn} min, walk is ${walkTime} min</span>`;
           html += `</div>`;
         }
 
-        html += `</div>`;
+        // Detailed Segments (Transfers)
+        if (route.segments && route.segments.length > 0) {
+          html += `<div style="margin-top: 16px; border-top: 1px solid var(--border-color); padding-top: 12px;">`;
+          html += `<div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px;">Route Details</div>`;
+
+          route.segments.forEach((seg, i) => {
+            const isLast = i === route.segments.length - 1;
+            const lineColor = getLineColor(seg.line);
+
+            html += `<div style="display: flex; gap: 12px; margin-bottom: ${isLast ? 0 : 12}px; position: relative;">`;
+
+            // Line connecting dots
+            if (!isLast) {
+              html += `<div style="position: absolute; left: 14px; top: 28px; bottom: -14px; width: 2px; background: var(--border-color);"></div>`;
+            }
+
+            // Icon
+            html += `<div style="width: 30px; height: 30px; background: ${lineColor}; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 14px; flex-shrink: 0; z-index: 1;">${seg.line}</div>`;
+
+            // Text
+            html += `<div>`;
+            html += `<div style="font-weight: 600; color: var(--text-primary);">Take ${seg.line} Train</div>`;
+            // We need station names, but segments only have IDs. 
+            // Ideally backend should send names. For now, we might just show "to next transfer".
+            // Let's rely on the fact that we can't easily get names here without backend update.
+            // Update: Backend sends 'segments' with IDs. We need names.
+            // Assuming backend update in next step or we accept IDs for now.
+            // Actually, let's just say "Ride X stops"
+            const stopCount = seg.stations.length - 1;
+            html += `<div style="font-size: 13px; color: var(--text-secondary);">${stopCount} stops</div>`;
+
+            if (!isLast) {
+              html += `<div style="font-size: 12px; font-weight: 600; color: var(--text-primary); margin-top: 4px; padding: 2px 6px; background: var(--bg-tertiary); border-radius: 4px; display: inline-block;">Transfer</div>`;
+            }
+            html += `</div>`;
+            html += `</div>`;
+          });
+          html += `</div>`;
+        }
       } else {
-        html += `<div style="margin: 10px 0; padding: 12px; background: rgba(245, 158, 11, ${isDarkMode ? '0.2' : '0.1'}); border-left: 4px solid var(--warning); border-radius: 6px; font-size: 14px; color: var(--warning); font-weight: 600;">⚠️ No trains in next 10 min</div>`;
+        html += `<div style="padding: 12px; background: rgba(245, 158, 11, 0.1); border-radius: var(--radius-md); color: var(--warning); font-weight: 600; font-size: 14px; text-align: center;">No trains in next 10 min</div>`;
       }
 
-      // Timeline view removed - moved to modal
-      html += `</div>`;
+      html += `</div>`; // End Body
 
-      html += `</div>`;
+      // Footer (Backup Train)
+      if (route.trains && route.trains.length > 1 && route.strategy === 'safest') {
+        const backupTrain = route.trains[1];
+        const backupLineColor = getLineColor(backupTrain.route_id);
+
+        html += `<div class="route-card-footer">`;
+        html += `<div style="font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--text-muted); letter-spacing: 0.05em;">Backup Train</div>`;
+        html += `<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">`;
+        html += `<div style="width: 24px; height: 24px; background: ${backupLineColor}; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: white; font-weight: 700; font-size: 12px;">${backupTrain.route_id}</div>`;
+        html += `<div style="font-weight: 600; color: var(--text-primary); font-size: 14px;"><span data-train="backup-time">${backupTrain.minutes_away}</span> min</div>`;
+        html += `<div style="font-size: 12px; color: var(--text-secondary);">(${backupTrain.arrival_time})</div>`;
+        html += `</div>`;
+        html += `</div>`;
+      }
+
+      html += `</div>`; // End Card
     });
 
     html += '</div>';
@@ -1047,7 +1112,7 @@
       });
 
       html += `<div style="background: rgba(245, 158, 11, ${isDark ? '0.2' : '0.1'}); padding: 12px; border-radius: 8px; margin-top: 12px; border-left: 4px solid var(--warning);">`;
-      html += `<div style="font-size: 12px; font-weight: 600; color: var(--warning); margin-bottom: 4px;">⚠️ Delays</div>`;
+      html += `<div style="margin-bottom: 4px;"><span title="Delays or service changes reported by MTA" style="cursor: help; color: var(--warning); font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; background: rgba(245, 158, 11, 0.2); padding: 2px 6px; border-radius: 4px;">Service Alert</span></div>`;
       Object.keys(delaysByLine).forEach(line => {
         const statuses = [...new Set(delaysByLine[line])];
         html += `<div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;"><strong>Line ${line}:</strong> ${statuses.join(', ')}</div>`;
@@ -1209,5 +1274,25 @@
     }
   }
 
+  function shortenAddress(address) {
+    if (!address) return address;
+
+    // Split by commas and filter
+    const parts = address.split(',').map(p => p.trim());
+    const filtered = parts.filter(part => {
+      const lower = part.toLowerCase();
+      // Skip county, state, country, zip codes, villages, and 'yard'
+      if (['county', 'united states', 'usa', 'new york state', 'ny state', 'city of new york', 'village', 'yard'].some(skip => lower.includes(skip))) {
+        return false;
+      }
+      // Skip zip codes (5 digits)
+      if (/^\d{5}$/.test(part)) return false;
+      // Skip if it's just "New York" (state)
+      if (lower === 'new york') return false;
+      return true;
+    });
+
+    return filtered.join(', ');
+  }
 </script>
 {% endblock %}

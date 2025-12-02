@@ -10,6 +10,12 @@ ORS_API_KEY = os.getenv("ORS_API_KEY", "")
 # Google Maps Directions API (for route comparison)
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "")
 
+# Routing Efficiency Constants
+# Thresholds for detecting inefficient routes (e.g. bad snapping to tunnels/bridges)
+ROUTE_EFFICIENCY_CHECK_DISTANCE = 800      # Only check for inefficiency if straight-line distance is < 800m
+ROUTE_EFFICIENCY_THRESHOLD_RATIO = 2.0     # Route is inefficient if it's > 2.0x the straight-line distance
+HEURISTIC_FALLBACK_FACTOR = 1.3            # Factor to apply to straight-line distance for heuristic fallback
+
 def geocode_address(address):
     """Geocode an address to coordinates using Nominatim."""
     try:
@@ -35,7 +41,7 @@ def geocode_address(address):
                     "display_name": shorten_address(full_address)
                 }
     except Exception as e:
-        print(f"Geocoding error: {e}")
+        logger.error(f"Geocoding error: {e}")
     return None
 
 def shorten_address(address):
@@ -50,13 +56,13 @@ def shorten_address(address):
     for part in parts:
         part_lower = part.lower()
         # Skip county, state, country, zip codes, and villages
-        if any(skip in part_lower for skip in ['county', 'united states', 'usa', 'new york state', 'ny state', 'city of new york', 'village']):
+        if any(skip in part_lower for skip in ['county', 'united states', 'usa', 'new york state', 'ny state', 'city of new york', 'village', 'yard']):
             continue
         # Skip zip codes (5 digits)
         if part.strip().isdigit() and len(part.strip()) == 5:
             continue
         # Skip if it's just "New York" (state) - we'll keep borough names
-        if part_lower == 'new york' and 'city' not in part_lower and 'manhattan' not in part_lower and 'brooklyn' not in part_lower and 'queens' not in part_lower and 'bronx' not in part_lower:
+        if part_lower == 'new york':
             # This is likely the state name
             continue
         filtered_parts.append(part)
@@ -82,105 +88,229 @@ def reverse_geocode(lat, lon):
                 address = data["display_name"]
                 return shorten_address(address)
     except Exception as e:
-        print(f"Reverse geocoding error: {e}")
+        logger.error(f"Reverse geocoding error: {e}")
     return None
 
 @bp.get("/api/route/search")
 def search_locations():
-    """Search for locations with autocomplete."""
+    """Search for locations with autocomplete using Photon API (faster/fuzzy)."""
     query = request.args.get('q', '')
     if not query or len(query) < 2:
         return jsonify({"results": []})
     
     try:
-        url = "https://nominatim.openstreetmap.org/search"
+        # Use Photon API (based on OSM, supports fuzzy search)
+        url = "https://photon.komoot.io/api/"
         params = {
             "q": query,
-            "format": "json",
             "limit": 5,
-            "addressdetails": 1,
-            "bounded": 1,
-            "viewbox": "-74.3,40.4,-73.7,41.0",  # NYC area
-            "countrycodes": "us"
+            "bbox": "-74.3,40.4,-73.7,41.0",  # NYC area bounding box
+            "lang": "en"
         }
-        headers = {"User-Agent": "AlwaysOnTime/1.0"}
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        
+        # Add a small timeout to prevent hanging
+        response = requests.get(url, params=params, timeout=3)
+        
         if response.status_code == 200:
             data = response.json()
-            results = [
-                {
-                    "display_name": shorten_address(item["display_name"]),
-                    "latitude": float(item["lat"]),
-                    "longitude": float(item["lon"])
-                }
-                for item in data
-            ]
+            results = []
+            
+            for feature in data.get("features", []):
+                props = feature.get("properties", {})
+                coords = feature.get("geometry", {}).get("coordinates", [0, 0])
+                
+                # Build a clean display name
+                name = props.get("name", "")
+                street = props.get("street", "")
+                housenumber = props.get("housenumber", "")
+                city = props.get("city", props.get("town", props.get("district", "")))
+                
+                # Construct address part
+                address_parts = []
+                if housenumber and street:
+                    address_parts.append(f"{housenumber} {street}")
+                elif street:
+                    address_parts.append(street)
+                
+                if city and city != name: # Avoid duplication if name is the city
+                    address_parts.append(city)
+                
+                # Format: "Name" or "Address"
+                if name:
+                    display_name = name
+                    if address_parts:
+                        display_name += f", {', '.join(address_parts)}"
+                else:
+                    display_name = ", ".join(address_parts) if address_parts else "Unknown Location"
+                
+                # Fallback if empty
+                if not display_name or display_name == "Unknown Location":
+                    # Try to use formatted address if available or just raw properties
+                    display_name = props.get("formatted", "") or f"{coords[1]:.4f}, {coords[0]:.4f}"
+
+                results.append({
+                    "display_name": display_name,
+                    "name": name, # Send raw name for UI highlighting
+                    "address": ", ".join(address_parts), # Send raw address for UI
+                    "latitude": float(coords[1]),
+                    "longitude": float(coords[0])
+                })
+                
             return jsonify({"results": results})
+            
     except Exception as e:
         print(f"Search error: {e}")
     
     return jsonify({"results": []})
 
+
+# Cache for walking routes (key -> (route_data, timestamp))
+_walking_route_cache = {}
+_walking_cache_timeout = 3600  # Cache for 1 hour
+
 def get_walking_route(start_lat, start_lon, end_lat, end_lon):
     """Get walking route between two points using OpenRouteService."""
-    # Use OpenRouteService if API key is available
-    if ORS_API_KEY:
+    import time
+    
+    # Create cache key (rounded to ~10m precision to increase hit rate)
+    key = f"{round(start_lat, 4)},{round(start_lon, 4)}-{round(end_lat, 4)},{round(end_lon, 4)}"
+    
+    if key in _walking_route_cache:
+        data, timestamp = _walking_route_cache[key]
+        if time.time() - timestamp < _walking_cache_timeout:
+            return data
+            
+    # Helper to cache and return
+    def cache_and_return(result):
+        if result:
+            _walking_route_cache[key] = (result, time.time())
+        return result
+
+    # Helper to generate candidate points (approx 30m offsets)
+    def _get_candidate_points(lat, lon):
+        offsets = [
+            (0, 0),          # Original
+            (0.0003, 0),     # North ~30m
+            (-0.0003, 0),    # South ~30m
+            (0, 0.0003),     # East ~30m
+            (0, -0.0003)     # West ~30m
+        ]
+        return [(lat + lat_off, lon + lon_off) for lat_off, lon_off in offsets]
+
+    # Internal function to perform the actual API request
+    def _request_route(s_lat, s_lon, e_lat, e_lon):
+        # Use OpenRouteService if API key is available
+        if ORS_API_KEY:
+            try:
+                url = "https://api.openrouteservice.org/v2/directions/foot-walking"
+                headers = {"Authorization": ORS_API_KEY}
+                params = {
+                    "api_key": ORS_API_KEY,
+                    "start": f"{s_lon},{s_lat}",
+                    "end": f"{e_lon},{e_lat}"
+                }
+                response = requests.get(url, headers=headers, params=params, timeout=5)
+                if response.status_code == 200:
+                    data = response.json()
+                    if "features" in data and len(data["features"]) > 0:
+                        route = data["features"][0]
+                        geometry = route["geometry"]["coordinates"]
+                        route_coords = [[coord[1], coord[0]] for coord in geometry]
+                        properties = route["properties"]
+                        return {
+                            "distance": properties.get("segments", [{}])[0].get("distance", 0),
+                            "duration": int(properties.get("segments", [{}])[0].get("duration", 0) / 60),
+                            "route": route_coords
+                        }
+            except Exception:
+                pass
+        
+        # Try OSRM public API as fallback
         try:
-            url = "https://api.openrouteservice.org/v2/directions/foot-walking"
-            headers = {"Authorization": ORS_API_KEY}
-            params = {
-                "api_key": ORS_API_KEY,
-                "start": f"{start_lon},{start_lat}",
-                "end": f"{end_lon},{end_lat}"
-            }
-            response = requests.get(url, headers=headers, params=params, timeout=15)
+            url = f"http://router.project-osrm.org/route/v1/walking/{s_lon},{s_lat};{e_lon},{e_lat}"
+            params = {"overview": "full", "geometries": "geojson"}
+            response = requests.get(url, params=params, timeout=3)
             if response.status_code == 200:
                 data = response.json()
-                if "features" in data and len(data["features"]) > 0:
-                    route = data["features"][0]
+                if "routes" in data and len(data["routes"]) > 0:
+                    route = data["routes"][0]
                     geometry = route["geometry"]["coordinates"]
-                    # Convert [lon, lat] to [lat, lon] for Leaflet
                     route_coords = [[coord[1], coord[0]] for coord in geometry]
-                    properties = route["properties"]
+                    distance_meters = route["distance"]
                     return {
-                        "distance": properties.get("segments", [{}])[0].get("distance", 0),
-                        "duration": int(properties.get("segments", [{}])[0].get("duration", 0) / 60),
+                        "distance": distance_meters,
+                        "duration": int((distance_meters / 1.25) / 60),
                         "route": route_coords
                     }
-        except Exception as e:
-            print(f"Routing error: {e}")
-    
-    # Try OSRM public API as fallback (if ORS key missing or ORS request failed)
-    try:
-        # OSRM uses lon,lat format
-        url = f"http://router.project-osrm.org/route/v1/walking/{start_lon},{start_lat};{end_lon},{end_lat}"
-        params = {
-            "overview": "full",
-            "geometries": "geojson"
-        }
-        # Add a timeout to avoid hanging if the public API is slow
-        response = requests.get(url, params=params, timeout=3)
+        except Exception:
+            pass
+        return None
+
+    # Helper to validate and return route, with multi-point retry
+    def validate_and_return(result, depth=0):
+        if not result:
+            return None
+            
+        # Calculate straight-line distance
+        dist_straight = calculate_distance(start_lat, start_lon, end_lat, end_lon)
+        dist_routed = result['distance']
         
-        if response.status_code == 200:
-            data = response.json()
-            if "routes" in data and len(data["routes"]) > 0:
-                route = data["routes"][0]
-                geometry = route["geometry"]["coordinates"]
-                # Convert [lon, lat] to [lat, lon] for Leaflet
-                route_coords = [[coord[1], coord[0]] for coord in geometry]
+        # Sanity check: If routed distance is significantly larger than straight-line
+        # Relaxed thresholds: < ROUTE_EFFICIENCY_CHECK_DISTANCE and > ROUTE_EFFICIENCY_THRESHOLD_RATIO detour
+        is_inefficient = dist_straight < ROUTE_EFFICIENCY_CHECK_DISTANCE and dist_routed > dist_straight * ROUTE_EFFICIENCY_THRESHOLD_RATIO
+        
+        if is_inefficient and depth == 0:
+            print(f"Route inefficient (routed {dist_routed}m vs straight {dist_straight}m). Attempting multi-point routing...")
+            
+            # Generate candidates
+            start_candidates = _get_candidate_points(start_lat, start_lon)
+            end_candidates = _get_candidate_points(end_lat, end_lon)
+            
+            best_route = result
+            min_dist = dist_routed
+            
+            # Strategy: Try shifting Start first (common issue), then End
+            # We don't do all 5x5=25 combinations to save time/quota.
+            # Just try: Original->Neighbors(End) and Neighbors(Start)->Original
+            
+            candidates_to_try = []
+            # 1. Try shifting End point (4 attempts)
+            for i in range(1, 5):
+                candidates_to_try.append((start_lat, start_lon, end_candidates[i][0], end_candidates[i][1]))
+            # 2. Try shifting Start point (4 attempts)
+            for i in range(1, 5):
+                candidates_to_try.append((start_candidates[i][0], start_candidates[i][1], end_lat, end_lon))
                 
-                # OSRM public API sometimes returns unrealistic durations (too fast)
-                # Calculate duration manually using our standard speed (4.5 km/h = 1.25 m/s)
-                distance_meters = route["distance"]
-                duration_seconds = distance_meters / 1.25
-                
-                return {
-                    "distance": distance_meters,
-                    "duration": int(duration_seconds / 60),
-                    "route": route_coords
-                }
-    except Exception as e:
-        print(f"OSRM fallback error: {e}")
+            for s_lat, s_lon, e_lat, e_lon in candidates_to_try:
+                alt_result = _request_route(s_lat, s_lon, e_lat, e_lon)
+                if alt_result:
+                    # Add penalty for offset distance (approx distance from original point)
+                    # But for now, just comparing routed distance is usually enough
+                    if alt_result['distance'] < min_dist:
+                        min_dist = alt_result['distance']
+                        best_route = alt_result
+            
+            # Check if the best alternative is acceptable
+            if min_dist < dist_straight * ROUTE_EFFICIENCY_THRESHOLD_RATIO:
+                print(f"Found better route: {min_dist}m")
+                return cache_and_return(best_route)
+            else:
+                print("Multi-point routing failed to find efficient path. Falling back to heuristic.")
+
+        # If still inefficient after retries (or if depth > 0), fallback to heuristic
+        if is_inefficient:
+             heuristic_dist = dist_straight * HEURISTIC_FALLBACK_FACTOR
+             return cache_and_return({
+                "distance": heuristic_dist,
+                "duration": int((heuristic_dist / 1.35) / 60),
+                "route": [[start_lat, start_lon], [end_lat, end_lon]]
+            })
+            
+        return cache_and_return(result)
+
+    # Initial Request
+    initial_result = _request_route(start_lat, start_lon, end_lat, end_lon)
+    return validate_and_return(initial_result)
 
 def calculate_distance(lat1, lon1, lat2, lon2):
     """Calculate distance between two points using Haversine formula (returns meters)."""
@@ -195,10 +325,11 @@ def calculate_distance(lat1, lon1, lat2, lon2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def find_nearest_entrance(user_lat, user_lon, station_id, station_lat=None, station_lon=None):
+def find_nearest_entrance(user_lat, user_lon, station_id, station_lat=None, station_lon=None, check_walking=True):
     """
     Find the nearest entrance location to a station.
     First tries to find actual entrances from database, falls back to heuristic if none exist.
+    check_walking: If True, verifies actual walking distance (slower). If False, uses straight-line (faster).
     """
     from app.models import StationEntrance
     
@@ -215,6 +346,11 @@ def find_nearest_entrance(user_lat, user_lon, station_id, station_lat=None, stat
         # Sort by straight-line distance
         entrance_dists.sort(key=lambda x: x[1])
         
+        # If we don't need to check walking distance, just return the closest one
+        if not check_walking:
+            best_entrance = entrance_dists[0][0]
+            return best_entrance['latitude'], best_entrance['longitude'], best_entrance['description'] if best_entrance['description'] else 'Entrance'
+        
         # Check top 3 closest entrances for actual walking distance
         # This avoids selecting an entrance that is physically close but requires a long detour
         best_entrance = None
@@ -230,10 +366,16 @@ def find_nearest_entrance(user_lat, user_lon, station_id, station_lat=None, stat
             if route:
                 walking_dist = route['distance']
                 
+                # Sanity check: If walking distance is unreasonable (> 3x straight-line)
+                # and we are close (< 300m), assume router failed to snap and use heuristic
+                if straight_dist < 300 and walking_dist > straight_dist * 3:
+                    # Use heuristic: straight-line * 1.4 (typical urban penalty)
+                    walking_dist = straight_dist * 1.4
+                
                 # Optimization: If walking distance is very close to straight-line (within 1.5x),
                 # it's likely a direct path, so just take it immediately
                 if walking_dist < straight_dist * 1.5:
-                    return ent['latitude'], ent['longitude']
+                    return ent['latitude'], ent['longitude'], ent['description'] if ent['description'] else 'Entrance'
                 
                 if walking_dist < min_walking_dist:
                     min_walking_dist = walking_dist
@@ -245,17 +387,18 @@ def find_nearest_entrance(user_lat, user_lon, station_id, station_lat=None, stat
                     best_entrance = ent
         
         if best_entrance:
-            return best_entrance['latitude'], best_entrance['longitude']
+            return best_entrance['latitude'], best_entrance['longitude'], best_entrance['description'] if best_entrance['description'] else 'Entrance'
         
         # Fallback to closest by straight line if something went wrong
-        return entrance_dists[0][0]['latitude'], entrance_dists[0][0]['longitude']
+        fallback = entrance_dists[0][0]
+        return fallback['latitude'], fallback['longitude'], fallback['description'] if fallback['description'] else 'Entrance'
     
     # Fallback: use heuristic if no entrances in database
     if station_lat is None or station_lon is None:
         from app.models import Station
         station = Station.get_by_id(station_id)
         if not station:
-            return None, None
+            return None, None, None
         station_lat = station['latitude']
         station_lon = station['longitude']
     
@@ -289,7 +432,14 @@ def find_nearest_entrance(user_lat, user_lon, station_id, station_lat=None, stat
         math.cos(d) - math.sin(lat1_rad) * math.sin(lat_entrance_rad)
     )
     
-    return math.degrees(lat_entrance_rad), math.degrees(lon_entrance_rad)
+    # Generate a heuristic description based on bearing
+    bearing_deg = math.degrees(bearing) % 360
+    directions = ["North", "Northeast", "East", "Southeast", "South", "Southwest", "West", "Northwest"]
+    idx = int((bearing_deg + 22.5) / 45) % 8
+    direction_str = directions[idx]
+    description = f"{direction_str} side of station (Estimated)"
+    
+    return math.degrees(lat_entrance_rad), math.degrees(lon_entrance_rad), description
 
 def get_actual_subway_time(origin_station, dest_station, train_route_id, origin_arrival_time, trip_id=None):
     """
@@ -520,6 +670,7 @@ def find_intermediate_stations(origin_station, dest_station, train_line):
                 dest_found = False
                 origin_idx = -1
                 dest_idx = -1
+                last_station_name = None
                 
                 for stop_update in trip_update.stop_time_update:
                     if stop_update.HasField('stop_id'):
@@ -529,12 +680,18 @@ def find_intermediate_stations(origin_station, dest_station, train_line):
                         for station_name, station in station_by_name.items():
                             if (stop_id.lower() in station_name or 
                                 station_name.replace(' ', '').replace('-', '').lower() in stop_id.lower()):
+                                
+                                # Deduplicate: Don't add same station twice in a row
+                                if last_station_name and station['name'] == last_station_name:
+                                    break
+                                
                                 stop_sequence.append({
                                     'stop_id': stop_id,
                                     'station_name': station['name'],
                                     'station': station,
                                     'sequence': len(stop_sequence)
                                 })
+                                last_station_name = station['name']
                                 
                                 # Check if this is origin or destination
                                 if station_name == origin_name_lower:
@@ -544,17 +701,19 @@ def find_intermediate_stations(origin_station, dest_station, train_line):
                                     dest_found = True
                                     dest_idx = len(stop_sequence) - 1
                                 break
-                
+            
                 # If we found both origin and destination in sequence
                 if origin_found and dest_found and origin_idx >= 0 and dest_idx >= 0:
                     # Get stations between origin and destination
+                    # INCLUDE the destination (dest_idx + 1)
                     if origin_idx < dest_idx:
                         # Normal direction
-                        intermediate_stops = stop_sequence[origin_idx + 1:dest_idx]
+                        intermediate_stops = stop_sequence[origin_idx + 1:dest_idx + 1]
                     else:
                         # Reverse direction
-                        intermediate_stops = stop_sequence[dest_idx + 1:origin_idx]
-                        intermediate_stops.reverse()
+                        # If origin is after dest, we want stops from dest_idx up to (but not including) origin_idx
+                        intermediate_stops = stop_sequence[dest_idx:origin_idx]
+                        intermediate_stops.reverse() # Reverse to maintain logical order from origin to dest
                     
                     # Convert to our format
                     intermediate = []
@@ -640,21 +799,39 @@ def find_nearest_stations(lat, lon, limit=15, max_distance=2500):
             seen_stations[key] = station
             unique_stations.append(station)
     
+    # First pass: Calculate straight-line distance to station center for ALL stations
+    # This avoids calling find_nearest_entrance (which triggers API calls) for far-away stations
+    initial_candidates = []
+    for station in unique_stations:
+        dist = calculate_distance(lat, lon, station['latitude'], station['longitude'])
+        if dist <= max_distance * 1.5:  # Add buffer for initial filter
+            initial_candidates.append((station, dist))
+    
+    # Sort by straight-line distance and take top candidates (e.g., 20)
+    initial_candidates.sort(key=lambda x: x[1])
+    top_candidates = initial_candidates[:20]
+    
     station_distances = []
     
-    for station in unique_stations:
+    # Second pass: Refine distance using actual entrances for top candidates only
+    for station, _ in top_candidates:
         # Use entrance location for distance calculation (more accurate)
-        entrance_lat, entrance_lon = find_nearest_entrance(
-            lat, lon, station['id'], station['latitude'], station['longitude']
+        # Pass check_walking=False to avoid expensive API calls - straight line to entrance is good enough for sorting
+        entrance_lat, entrance_lon, _ = find_nearest_entrance(
+            lat, lon, station['id'], station['latitude'], station['longitude'], check_walking=False
         )
         if entrance_lat is None or entrance_lon is None:
             # Fallback to station center if no entrance found
             entrance_lat, entrance_lon = station['latitude'], station['longitude']
+        
+        # We still use straight-line distance here for speed, but to the ENTRANCE
+        # (find_nearest_entrance already did the heavy lifting of finding the best entrance)
         distance = calculate_distance(lat, lon, entrance_lat, entrance_lon)
-        if distance <= max_distance:  # Only consider stations within 2km
+        
+        if distance <= max_distance:
             station_distances.append((station, distance))
     
-    # Sort by distance and return top N
+    # Sort by refined distance and return top N
     station_distances.sort(key=lambda x: x[1])
     return [(station, dist) for station, dist in station_distances[:limit]]
 
@@ -761,21 +938,21 @@ def estimate_subway_time_improved(origin_station, dest_station, shared_lines):
     if shared_lines:
         # Direct route - use better speed estimate
         # NYC subway average speed: ~28-32 km/h in Manhattan, ~35-40 km/h in outer areas
-        # Use 32 km/h as more accurate estimate for direct routes
-        subway_time = int((subway_dist / 1000) / 32 * 60)
+        # Use 30 km/h as a conservative average for direct routes
+        subway_time = int((subway_dist / 1000) / 30 * 60)
     else:
         # Transfer route - slower and add transfer time
-        # Average speed for routes with transfers: ~27 km/h
-        subway_time = int((subway_dist / 1000) / 27 * 60) + 4  # +4 min for transfer (reduced from 5)
+        # Average speed for routes with transfers: ~25 km/h
+        subway_time = int((subway_dist / 1000) / 25 * 60) + 4  # +4 min for transfer
     
     return max(5, subway_time)  # Minimum 5 min
 
-def find_route_options(origin_lat, origin_lon, dest_lat, dest_lon):
+def find_route_options(origin_lat, origin_lon, dest_lat, dest_lon, avoid_lines=None):
     """Find route options with three different strategies."""
-    # Optimized: Use 10x10 for speed (100 combinations is good coverage and faster)
-    # Reduced from 15x15 to improve performance
-    origin_stations = find_nearest_stations(origin_lat, origin_lon, limit=10, max_distance=2000)
-    dest_stations = find_nearest_stations(dest_lat, dest_lon, limit=10, max_distance=2000)
+    # Optimized: Use 5x5 for speed (25 combinations is sufficient coverage and much faster)
+    # Reduced from 10x10 to improve performance
+    origin_stations = find_nearest_stations(origin_lat, origin_lon, limit=5, max_distance=2000)
+    dest_stations = find_nearest_stations(dest_lat, dest_lon, limit=5, max_distance=2000)
     
     if not origin_stations or not dest_stations:
         return None, None, None
@@ -805,6 +982,12 @@ def find_route_options(origin_lat, origin_lon, dest_lat, dest_lon):
             dest_lines = set(dest_station['lines'].split(',')) if dest_station['lines'] else set()
             shared_lines = origin_lines.intersection(dest_lines)
             
+            # If we need to avoid specific lines (for contingency routes), filter them out
+            if avoid_lines:
+                shared_lines = shared_lines - set(avoid_lines)
+                # If no shared lines left after filtering, and we're not allowing transfers yet, skip
+                # (For now we only support direct routes in this simple logic, transfers are handled by "not shared_lines")
+            
             # Calculate walking time estimates (improved: 4.5 km/h average walking speed)
             walk_to_time = int((origin_dist / 1000) / 4.5 * 60)  # 4.5 km/h walking speed (more realistic)
             walk_from_time = int((dest_dist / 1000) / 4.5 * 60)
@@ -818,7 +1001,43 @@ def find_route_options(origin_lat, origin_lon, dest_lat, dest_lon):
                 walk_from_time = max(1, int(walk_from_time - correction))
             
             # Use improved subway time estimation
-            subway_time = estimate_subway_time_improved(origin_station, dest_station, shared_lines)
+            if shared_lines:
+                # Direct route
+                subway_time = estimate_subway_time_improved(origin_station, dest_station, shared_lines)
+                segments = [{
+                    "from_id": origin_station['id'],
+                    "to_id": dest_station['id'],
+                    "line": list(shared_lines)[0], # Pick one
+                    "stations": [] # We could fill this if needed
+                }]
+            else:
+                # Transfer route - use Graph!
+                from app.utils.graph import find_path
+                segments = find_path(origin_station['id'], dest_station['id'])
+                
+                if segments:
+                    # Calculate time based on segments
+                    # 2 min per station + 4 min per transfer
+                    subway_time = 0
+                    for i, seg in enumerate(segments):
+                        # Station time
+                        count = len(seg['stations']) - 1 # Edges
+                        subway_time += count * 2
+                        
+                        # Transfer time (if not last segment)
+                        if i < len(segments) - 1:
+                            subway_time += 4
+                    
+                    # Add initial boarding
+                    subway_time += 2
+                else:
+                    # Fallback if graph fails
+                    subway_dist = calculate_distance(
+                        origin_station['latitude'], origin_station['longitude'],
+                        dest_station['latitude'], dest_station['longitude']
+                    )
+                    subway_time = int((subway_dist / 1000) / 25 * 60) + 4
+                    segments = []
             
             # Apply learned corrections if available
             corrections = get_learned_corrections()
@@ -859,6 +1078,7 @@ def find_route_options(origin_lat, origin_lon, dest_lat, dest_lon):
                 "route_score": route_score,  # For better sorting
                 "shared_lines": list(shared_lines),
                 "direct_line": len(shared_lines) > 0,
+                "segments": segments, # NEW: Explicit segments
                 "frequency_score": freq_data['frequency_score'],
                 "avg_gap": freq_data['avg_gap'],
                 "max_gap": freq_data['max_gap']
@@ -1525,29 +1745,37 @@ def plan_route():
     from app.blueprints.status import _parse_alerts
     all_alerts = _parse_alerts()
     
-    for option, strategy_id, strategy_name, strategy_desc in route_options:
+    # Get alerts to check for route-specific delays
+    from app.blueprints.status import _parse_alerts
+    all_alerts = _parse_alerts()
+    
+    # Helper to process a route option and get full data
+    def _process_route_data(option, strategy_id, strategy_name, strategy_desc):
         origin_station = option['origin_station']
         dest_station = option['dest_station']
-        walk_to_time = option['walk_to_time']
+        # Use ceil to be safe - better to overestimate walk time than miss a train
+        import math
+        walk_to_time = math.ceil(option['walk_to_time'])
         
         # Check for delays on the ACTUAL train line being used in this route
-        # We'll check this after we get the trains, so initialize empty for now
         route_delays = []
         
         # Find nearest entrance locations (not station centers)
-        origin_entrance_lat, origin_entrance_lon = find_nearest_entrance(
+        origin_entrance_lat, origin_entrance_lon, origin_entrance_desc = find_nearest_entrance(
             origin_coords["latitude"], origin_coords["longitude"],
             origin_station['id'], origin_station['latitude'], origin_station['longitude']
         )
         if origin_entrance_lat is None or origin_entrance_lon is None:
             origin_entrance_lat, origin_entrance_lon = origin_station['latitude'], origin_station['longitude']
+            origin_entrance_desc = "Main Entrance"
         
-        dest_entrance_lat, dest_entrance_lon = find_nearest_entrance(
+        dest_entrance_lat, dest_entrance_lon, dest_entrance_desc = find_nearest_entrance(
             dest_coords["latitude"], dest_coords["longitude"],
             option['dest_station']['id'], option['dest_station']['latitude'], option['dest_station']['longitude']
         )
         if dest_entrance_lat is None or dest_entrance_lon is None:
             dest_entrance_lat, dest_entrance_lon = option['dest_station']['latitude'], option['dest_station']['longitude']
+            dest_entrance_desc = "Main Entrance"
         
         # Get walking route to/from entrance locations
         walk_to_station = get_walking_route(
@@ -1560,22 +1788,23 @@ def plan_route():
             dest_coords["latitude"], dest_coords["longitude"]
         )
         
+        # Calculate effective walking times (using ORS if available, else heuristic)
+        # Also apply 3-minute buffer to origin walk for non-fastest routes (apartment exit time)
+        origin_walk_time = walk_to_station['duration'] if walk_to_station else walk_to_time
+        dest_walk_time = walk_from_station['duration'] if walk_from_station else option['walk_from_time']
+        
+        if strategy_id != 'fastest':
+            origin_walk_time += 3
+            
+        # Update walk_to_time variable for train filtering logic
+        walk_to_time = origin_walk_time
+        
         # Get train arrivals for origin station
         arrivals = _parse_next_arrivals(origin_station['lines'])
         
-        # Debug: log arrivals for troubleshooting
-        if arrivals:
-            sample_str = ', '.join([f"{a['route_id']}: {a['minutes_away']}min" for a in arrivals[:3]])
-            print(f"DEBUG: Found {len(arrivals)} arrivals for {origin_station['name']}, walk_time={walk_to_time} min")
-            print(f"  Sample: {sample_str}")
-        else:
-            print(f"DEBUG: No arrivals found for station {origin_station['name']} with lines {origin_station['lines']}")
-        
         if not arrivals:
-            # If no arrivals at all, create a placeholder
             relevant_trains = []
         else:
-            # More flexible filtering: show trains that are useful
             # Priority 1: Trains arriving between walk_time and walk_time + 10 minutes (ideal window)
             # Priority 2: Next train after walk_time (even if > 10 min)
             # Priority 3: Trains arriving soon (if walk_time is long, show what's coming)
@@ -1615,41 +1844,26 @@ def plan_route():
                 relevant_trains.append(next_trains[0])
             
             # If still no trains arriving after walk time, we need to look further ahead
-            # Get the next train that arrives after walk time (even if it's 20+ minutes away)
             if not relevant_trains:
-                # Find any train arriving after walk time
                 future_trains = [a for a in arrivals if a.get('minutes_away', 0) > walk_to_time]
                 if future_trains:
                     future_trains.sort(key=lambda x: x.get('minutes_away', 999))
                     relevant_trains.append(future_trains[0])
             
             # Last resort: if absolutely no trains after walk time
-            # This can happen when:
-            # 1. All trains in feed are arriving at OTHER stations (showing 0 min)
-            # 2. The target station's trains aren't in the feed yet
-            # Solution: Estimate when next train will arrive at target station
             if not relevant_trains and arrivals:
-                # Check if all trains are showing 0 min (arriving at other stations)
                 all_zero = all(a.get('minutes_away', 0) == 0 for a in arrivals[:10])
-                
                 if all_zero and walk_to_time > 0:
-                    # All trains are at other stations. Estimate next train at target station.
-                    # Primary train should arrive at walk_time + 2 min (2 min buffer)
                     estimated_arrival = primary_target
-                    
-                    # Create an estimated train entry
                     if arrivals:
                         sample_train = arrivals[0].copy()
                         sample_train['minutes_away'] = estimated_arrival
-                        # Update arrival time estimate
                         from datetime import datetime, timedelta
                         estimated_time = datetime.now() + timedelta(minutes=estimated_arrival)
                         sample_train['arrival_time'] = estimated_time.strftime("%I:%M %p")
-                        sample_train['estimated'] = True  # Mark as estimated
+                        sample_train['estimated'] = True
                         relevant_trains.append(sample_train)
-                        print(f"DEBUG: Using estimated train arrival: {estimated_arrival} min (all trains at other stations)")
                 else:
-                    # Some trains exist, just show the next one
                     arrivals_sorted = sorted(arrivals, key=lambda x: x.get('minutes_away', 999))
                     relevant_trains.append(arrivals_sorted[0])
             
@@ -1657,150 +1871,151 @@ def plan_route():
             relevant_trains.sort(key=lambda x: x.get('minutes_away', 999))
             
             # For safest option, ALWAYS ensure we have a backup train
-            # Backup train should arrive at walk_time + 5 min or later (5+ min buffer)
             if strategy_id == 'safest' and len(relevant_trains) == 1:
                 primary_train = relevant_trains[0]
                 primary_minutes = primary_train.get('minutes_away', 0)
                 
-                # Try to find a real backup train arriving at walk_time + 5 min or later
                 backup_trains = []
                 for arrival in arrivals:
                     minutes_away = arrival.get('minutes_away', 0)
-                    # Backup must arrive at least 5 min after walk time
                     if minutes_away >= backup_target and minutes_away <= (walk_to_time + 20):
-                        # Check if different from primary
                         is_duplicate = False
                         if arrival.get('route_id') == primary_train.get('route_id') and abs(minutes_away - primary_minutes) <= 1:
                             is_duplicate = True
                         if not is_duplicate:
                             backup_trains.append(arrival)
                 
-                backup_trains.sort(key=lambda x: abs(x.get('minutes_away', 999) - backup_target))  # Closest to target
+                backup_trains.sort(key=lambda x: abs(x.get('minutes_away', 999) - backup_target))
                 
                 if backup_trains:
                     relevant_trains.append(backup_trains[0])
-                    print(f"DEBUG: Added backup train: {backup_trains[0]['route_id']} in {backup_trains[0]['minutes_away']} min (target: {backup_target} min)")
                 else:
-                    # No real backup found - estimate one
-                    # Backup should arrive at walk_time + 5 min (5 min buffer after walking)
                     backup_estimated_arrival = backup_target
-                    
-                    # Create estimated backup train
                     backup_train = primary_train.copy()
                     backup_train['minutes_away'] = backup_estimated_arrival
                     from datetime import datetime, timedelta
                     backup_time = datetime.now() + timedelta(minutes=backup_estimated_arrival)
                     backup_train['arrival_time'] = backup_time.strftime("%I:%M %p")
                     backup_train['estimated'] = True
-                    # Try to use a different route if available
                     if len(arrivals) > 0:
                         different_routes = [a for a in arrivals if a.get('route_id') != primary_train.get('route_id')]
                         if different_routes:
                             backup_train['route_id'] = different_routes[0].get('route_id', primary_train.get('route_id'))
-                    
                     relevant_trains.append(backup_train)
-                    print(f"DEBUG: Created estimated backup train: {backup_train['route_id']} in {backup_estimated_arrival} min (target: {backup_target} min)")
             
             # Sort by arrival time
             relevant_trains.sort(key=lambda x: x.get('minutes_away', 999))
             
-            # Limit to primary train + backup (max 2 for safest, 1 for others)
+            # Limit to primary train + backup
             max_trains = 2 if strategy_id == 'safest' else 1
             relevant_trains = relevant_trains[:max_trains]
+        
+        # Calculate actual subway time using MTA real-time data
+        actual_subway_time = None
+        if relevant_trains and len(relevant_trains) > 0:
+            primary_train = relevant_trains[0]
+            primary_train_route = primary_train.get('route_id', '')
+            primary_train_minutes = primary_train.get('minutes_away', 0)
+            primary_train_trip_id = primary_train.get('trip_id')
             
-            # Calculate actual subway time using MTA real-time data
-            actual_subway_time = None
-            if relevant_trains and len(relevant_trains) > 0:
-                primary_train = relevant_trains[0]
-                primary_train_route = primary_train.get('route_id', '')
-                primary_train_minutes = primary_train.get('minutes_away', 0)
-                primary_train_trip_id = primary_train.get('trip_id')  # Get trip_id if available
-                
-                # Try to get actual subway time from MTA API
-                actual_subway_time = get_actual_subway_time(
-                    origin_station, 
-                    option['dest_station'], 
-                    primary_train_route,
-                    primary_train_minutes,
-                    trip_id=primary_train_trip_id
+            actual_subway_time = get_actual_subway_time(
+                origin_station, 
+                option['dest_station'], 
+                primary_train_route,
+                primary_train_minutes,
+                trip_id=primary_train_trip_id
+            )
+            
+            if actual_subway_time:
+                time_diff = abs(actual_subway_time - option['subway_time'])
+                if time_diff > 1:
+                    option['subway_time'] = actual_subway_time
+        
+        # Check for delays and intermediate stations
+        intermediate_stations = []
+        train_line = None
+        if relevant_trains and len(relevant_trains) > 0:
+            primary_train_line = relevant_trains[0].get('route_id', '')
+            if primary_train_line:
+                train_line = primary_train_line[0] if primary_train_line else ''
+                intermediate_stations = find_intermediate_stations(
+                    origin_station, option['dest_station'], train_line
                 )
                 
-                if actual_subway_time:
-                    # Always use actual time if available (it's more accurate than estimates)
-                    time_diff = abs(actual_subway_time - option['subway_time'])
-                    if time_diff > 1:  # If different by more than 1 min, update
-                        print(f"DEBUG: Found actual subway time: {actual_subway_time} min (was estimated: {option['subway_time']} min) - will use actual")
-                        # Update option so route_data uses it
-                        option['subway_time'] = actual_subway_time
-                    else:
-                        print(f"DEBUG: Actual subway time ({actual_subway_time} min) matches estimate ({option['subway_time']} min)")
-                else:
-                    print(f"DEBUG: Could not find actual subway time, using estimate: {option['subway_time']} min")
-            
-            # Now check for delays on the ACTUAL train line being used
-            # Also find intermediate stations
-            intermediate_stations = []
-            train_line = None
-            if relevant_trains and len(relevant_trains) > 0:
-                primary_train_line = relevant_trains[0].get('route_id', '')
-                if primary_train_line:
-                    # Extract just the line letter/number (e.g., "Q" from "Q", "6" from "6")
-                    train_line = primary_train_line[0] if primary_train_line else ''
-                    
-                    # Find intermediate stations on this line
-                    intermediate_stations = find_intermediate_stations(
-                        origin_station, option['dest_station'], train_line
-                    )
-                    
-                    # Filter alerts that affect this specific train line
-                    for alert in all_alerts:
-                        affected_lines_str = alert.get('affected_lines', '')
-                        if affected_lines_str:
-                            affected_lines = [line.strip() for line in affected_lines_str.split(',')]
-                            # Check if the actual train line is affected
-                            if train_line in affected_lines:
-                                # Only show delays/warnings/errors, not info alerts
-                                if alert.get('severity') in ['warning', 'error']:
-                                    route_delays.append({
-                                        'line': train_line,
-                                        'status': 'Delays' if alert.get('severity') == 'warning' else 'Service Suspended',
-                                        'alert': {
-                                            'header': alert.get('header', ''),
-                                            'description': alert.get('description', '')
-                                        }
-                                    })
-                                    # Only add once per line
-                                    break
+                for alert in all_alerts:
+                    affected_lines_str = alert.get('affected_lines', '')
+                    if affected_lines_str:
+                        affected_lines = [line.strip() for line in affected_lines_str.split(',')]
+                        if train_line in affected_lines:
+                            if alert.get('severity') in ['warning', 'error']:
+                                route_delays.append({
+                                    'line': train_line,
+                                    'status': 'Delays' if alert.get('severity') == 'warning' else 'Service Suspended',
+                                    'alert': {
+                                        'header': alert.get('header', ''),
+                                        'description': alert.get('description', '')
+                                    }
+                                })
+                                break
         
-        route_data = {
+        # Calculate Reliability Score
+        reliability_score = 100
+        reliability_reasons = []
+        
+        if route_delays:
+            reliability_score -= 30
+            reliability_reasons.append("Service alerts reported")
+            
+        avg_gap = option.get('avg_gap', 0)
+        if avg_gap > 15:
+            reliability_score -= 15
+            reliability_reasons.append("Infrequent trains")
+        elif avg_gap > 10:
+            reliability_score -= 5
+            
+        if not option.get('direct_line', False):
+            reliability_score -= 10
+            reliability_reasons.append("Requires transfer")
+            
+        if not relevant_trains or any(t.get('estimated', False) for t in relevant_trains):
+            reliability_score -= 10
+            reliability_reasons.append("Using estimated schedule")
+            
+        reliability_score = max(0, min(100, reliability_score))
+        
+        return {
             "strategy": strategy_id,
             "strategy_name": strategy_name,
             "strategy_desc": strategy_desc,
+            "reliability_score": reliability_score,
+            "reliability_reasons": reliability_reasons,
             "origin_station": {
                 "id": origin_station['id'],
                 "name": origin_station['name'],
-                "coordinates": [origin_station['latitude'], origin_station['longitude']],  # Station center for map
-                "entrance_coordinates": [origin_entrance_lat, origin_entrance_lon],  # Entrance location for walking
+                "coordinates": [origin_station['latitude'], origin_station['longitude']],
+                "entrance_coordinates": [origin_entrance_lat, origin_entrance_lon],
+                "entrance_description": origin_entrance_desc,
                 "lines": origin_station['lines'].split(',') if origin_station['lines'] else [],
-                "walk_distance": round(walk_to_station.get("distance", option['origin_walk_dist']) / 1000, 2) if walk_to_station else round(option['origin_walk_dist'] / 1000, 2),  # km
-                "walk_time": walk_to_station.get("duration", walk_to_time) if walk_to_station else walk_to_time,
+                "walk_distance": round(walk_to_station.get("distance", option['origin_walk_dist']) / 1000, 2) if walk_to_station else round(option['origin_walk_dist'] / 1000, 2),
+                "walk_time": origin_walk_time,
                 "walk_route": walk_to_station.get("route") if walk_to_station else None
             },
             "destination_station": {
                 "id": option['dest_station']['id'],
                 "name": option['dest_station']['name'],
-                "coordinates": [option['dest_station']['latitude'], option['dest_station']['longitude']],  # Station center for map
-                "entrance_coordinates": [dest_entrance_lat, dest_entrance_lon],  # Entrance location for walking
+                "coordinates": [option['dest_station']['latitude'], option['dest_station']['longitude']],
+                "entrance_coordinates": [dest_entrance_lat, dest_entrance_lon],
+                "entrance_description": dest_entrance_desc,
                 "lines": option['dest_station']['lines'].split(',') if option['dest_station']['lines'] else [],
-                "walk_distance": round(walk_from_station.get("distance", option['dest_walk_dist']) / 1000, 2) if walk_from_station else round(option['dest_walk_dist'] / 1000, 2),  # km
-                "walk_time": walk_from_station.get("duration", option['walk_from_time']) if walk_from_station else option['walk_from_time'],
+                "walk_distance": round(walk_from_station.get("distance", option['dest_walk_dist']) / 1000, 2) if walk_from_station else round(option['dest_walk_dist'] / 1000, 2),
+                "walk_time": dest_walk_time,
                 "walk_route": walk_from_station.get("route") if walk_from_station else None
             },
-            "trains": relevant_trains,  # Include all relevant trains (up to 2 for safest)
+            "trains": relevant_trains,
             "total_time": {
-                "walking": option['walk_to_time'] + option['walk_from_time'],
-                "subway": actual_subway_time if actual_subway_time else option['subway_time'],  # Use actual time if available
-                "total": (option['walk_to_time'] + option['walk_from_time']) + (actual_subway_time if actual_subway_time else option['subway_time'])
+                "walking": origin_walk_time + dest_walk_time,
+                "subway": actual_subway_time if actual_subway_time else option['subway_time'],
+                "total": (origin_walk_time + dest_walk_time) + (actual_subway_time if actual_subway_time else option['subway_time'])
             },
             "direct_line": option['direct_line'],
             "shared_lines": option['shared_lines'],
@@ -1808,11 +2023,46 @@ def plan_route():
                 "avg_gap": round(option.get('avg_gap', 0), 1),
                 "max_gap": round(option.get('max_gap', 0), 1)
             },
-            "delays": route_delays,  # Route-specific delays
-            "intermediate_stations": [s['name'] for s in intermediate_stations] if intermediate_stations else [],  # Station names for display
-            "subway_path": _build_subway_path(origin_station, option['dest_station'], intermediate_stations)  # Coordinates for map path
+            "delays": route_delays,
+            "intermediate_stations": [s['name'] for s in intermediate_stations] if intermediate_stations else [],
+            "subway_path": _build_subway_path(origin_station, option['dest_station'], intermediate_stations)
         }
-        routes_with_trains.append(route_data)
+
+    # Process standard options
+    for option, strategy_id, strategy_name, strategy_desc in route_options:
+        routes_with_trains.append(_process_route_data(option, strategy_id, strategy_name, strategy_desc))
+    
+    # SMART CONTINGENCY CHECK
+    # Check if the "Safest" route (first one) has low reliability
+    if routes_with_trains:
+        safest_route = routes_with_trains[0]
+        if safest_route['reliability_score'] < 70:
+            print(f"DEBUG: Safest route reliability is low ({safest_route['reliability_score']}%) - looking for contingency")
+            
+            # Identify lines to avoid
+            avoid_lines = set(safest_route['shared_lines'])
+            
+            # Find a contingency route
+            contingency_option = find_contingency_route(
+                origin_coords["latitude"], origin_coords["longitude"],
+                dest_coords["latitude"], dest_coords["longitude"],
+                avoid_lines=list(avoid_lines)
+            )
+            
+            if contingency_option:
+                print("DEBUG: Found contingency route!")
+                # Process the contingency route
+                contingency_data = _process_route_data(
+                    contingency_option, 
+                    "contingency", 
+                    "Smart Contingency", 
+                    f"Avoids {', '.join(avoid_lines)} due to reliability issues"
+                )
+                
+                # Add it to the list (as the second option, right after safest)
+                routes_with_trains.insert(1, contingency_data)
+
+
     
     response_data = {
         "origin": {

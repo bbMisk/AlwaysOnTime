@@ -4,6 +4,11 @@ import requests
 import time
 from flask import g, current_app
 from app.utils.gtfs import fetch_gtfs_stations
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 def get_db():
     """Get database connection from Flask app context."""
@@ -124,24 +129,39 @@ def init_db():
     except Exception:
         pass
     
+    # Line sequences table (stores ordered list of stations for each line)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS line_sequences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            line_id TEXT NOT NULL,
+            sequence_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(line_id)
+        )
+    ''')
+    
     db.commit()
 
 def seed_stations():
     """Seed database with stations from official MTA GTFS data."""
     db = get_db()
     
-    print("Fetching station data from MTA GTFS feed...")
-    stations = fetch_gtfs_stations()
+    logger.info("Fetching station data from MTA GTFS feed...")
+    stations, line_sequences = fetch_gtfs_stations()
     
     if not stations:
-        print("Failed to fetch GTFS data. Aborting station seed.")
+        logger.error("Failed to fetch GTFS data. Aborting station seed.")
         return
         
-    print(f"Seeding {len(stations)} stations...")
+    logger.info(f"Seeding {len(stations)} stations and {len(line_sequences)} line sequences...")
     
-    # Clear existing stations
+    # Clear existing stations, entrances, and sequences
+    db.execute('DELETE FROM station_entrances')
+    db.execute('DELETE FROM sqlite_sequence WHERE name="station_entrances"')
     db.execute('DELETE FROM stations')
     db.execute('DELETE FROM sqlite_sequence WHERE name="stations"')
+    db.execute('DELETE FROM line_sequences')
+    db.execute('DELETE FROM sqlite_sequence WHERE name="line_sequences"')
     
     count = 0
     for s in stations:
@@ -150,9 +170,19 @@ def seed_stations():
             (s['name'], s['latitude'], s['longitude'], s['lines'], s['accessible'])
         )
         count += 1
+    
+    # Seed line sequences
+    import json
+    seq_count = 0
+    for line_id, sequence in line_sequences.items():
+        db.execute(
+            'INSERT INTO line_sequences (line_id, sequence_json) VALUES (?, ?)',
+            (line_id, json.dumps(sequence))
+        )
+        seq_count += 1
         
     db.commit()
-    print(f"✓ Successfully seeded {count} stations.")
+    logger.info(f"✓ Successfully seeded {count} stations and {seq_count} line sequences.")
 
 def fetch_mta_entrances():
     """Fetch actual subway entrances from MTA's official dataset."""
@@ -223,30 +253,27 @@ def match_entrances_to_stations(mta_entrances, stations):
         normalized_mta_name = normalized_mta_name.replace('-', ' ').replace('  ', ' ')
         
         # Try exact match first
-        matched_station = None
+        matched_stations = []
+        
         if normalized_mta_name in station_map:
-            # If multiple stations with same name, find closest by distance
+            # If multiple stations with same name, find ALL that are close
             candidates = station_map[normalized_mta_name]
-            if len(candidates) == 1:
-                matched_station = candidates[0]
-            else:
-                # Find closest by distance
-                min_dist = float('inf')
-                for candidate in candidates:
-                    dist = calculate_distance(lat, lon, candidate['latitude'], candidate['longitude'])
-                    if dist < 200 and dist < min_dist:
-                        min_dist = dist
-                        matched_station = candidate
-        else:
+            
+            for candidate in candidates:
+                dist = calculate_distance(lat, lon, candidate['latitude'], candidate['longitude'])
+                # Increased threshold to 400m for complex stations
+                if dist < 400: 
+                    matched_stations.append(candidate)
+        
+        # If no exact match found (or candidates were too far), try fuzzy matching
+        if not matched_stations:
             # Try fuzzy matching - find closest station by distance
             # Use more aggressive matching: prioritize distance, then name similarity
-            min_distance = float('inf')
-            best_match = None
             
             for station in stations:
                 dist = calculate_distance(lat, lon, station['latitude'], station['longitude'])
                 
-                if dist < 250:  # Within 250m (increased threshold)
+                if dist < 300:  # Within 300m
                     # Check name similarity
                     station_name_lower = station['name'].lower()
                     station_normalized = station_name_lower.replace(' st', ' st').replace(' av', ' av').replace(' ave', ' av')
@@ -256,12 +283,6 @@ def match_entrances_to_stations(mta_entrances, stations):
                     station_words = set(station_normalized.split())
                     word_overlap = len(mta_words.intersection(station_words))
                     
-                    # Very aggressive matching for accuracy:
-                    # 1. Very close (<50m) - always match (entrance is definitely for this station)
-                    # 2. Close (<100m) - always match (entrance is very likely for this station)
-                    # 3. Reasonable distance (<150m) with any word overlap
-                    # 4. Further (<200m) with 2+ word overlap
-                    # 5. Even further (<250m) with 3+ word overlap or substring match
                     should_match = False
                     if dist < 100:  # Within 100m, always match (entrance is definitely for this station)
                         should_match = True
@@ -269,14 +290,13 @@ def match_entrances_to_stations(mta_entrances, stations):
                         should_match = True
                     elif dist < 200 and word_overlap >= 2:
                         should_match = True
-                    elif dist < 250 and (word_overlap >= 3 or normalized_mta_name in station_normalized or station_normalized in normalized_mta_name):
+                    elif dist < 300 and (word_overlap >= 3 or normalized_mta_name in station_normalized or station_normalized in normalized_mta_name):
                         should_match = True
                     
-                    if should_match and dist < min_distance:
-                        min_distance = dist
-                        matched_station = station
+                    if should_match:
+                        matched_stations.append(station)
         
-        if matched_station:
+        if matched_stations:
             # Get entrance description
             entrance_type = entrance.get('entrance_type', '').strip()
             entry_allowed = entrance.get('entry_allowed', '').strip()
@@ -288,12 +308,13 @@ def match_entrances_to_stations(mta_entrances, stations):
             elif exit_allowed == 'YES' and entry_allowed != 'YES':
                 description += " (Exit Only)"
             
-            matched_entrances.append({
-                'station_id': matched_station['id'],
-                'latitude': lat,
-                'longitude': lon,
-                'description': description
-            })
+            for station in matched_stations:
+                matched_entrances.append({
+                    'station_id': station['id'],
+                    'latitude': lat,
+                    'longitude': lon,
+                    'description': description
+                })
         else:
             unmatched_count += 1
     
@@ -303,6 +324,7 @@ def seed_station_entrances():
     """Seed database with actual station entrances from MTA's official dataset."""
     from app.models import Station
     import math
+    from app.blueprints.route import calculate_distance
     
     db = get_db()
     
@@ -324,6 +346,28 @@ def seed_station_entrances():
         print(f"✓ Matched {len(matched_entrances)} MTA entrances to stations")
         if unmatched > 0:
             print(f"  ⚠ {unmatched} MTA entrances couldn't be matched")
+            # Print unmatched for debugging
+            for ent in mta_entrances:
+                name = ent.get('stop_name', '') or ent.get('constituent_station_name', '')
+                if name:
+                    # Check if this one was matched
+                    is_matched = False
+                    for m in matched_entrances:
+                        if abs(m['latitude'] - float(ent.get('entrance_latitude', 0))) < 0.0001:
+                            is_matched = True
+                            break
+                    if not is_matched:
+                        print(f"    - Unmatched: {name} ({ent.get('entrance_latitude')}, {ent.get('entrance_longitude')})")
+                        # Find closest station to see why it failed
+                        min_dist = float('inf')
+                        closest_st = None
+                        for s in all_stations:
+                            d = calculate_distance(float(ent.get('entrance_latitude')), float(ent.get('entrance_longitude')), s['latitude'], s['longitude'])
+                            if d < min_dist:
+                                min_dist = d
+                                closest_st = s
+                        if closest_st:
+                            print(f"      Closest station: {closest_st['name']} ({min_dist:.1f}m)")
         
         # Group by station to track which stations have MTA data
         for entrance in matched_entrances:
@@ -336,30 +380,26 @@ def seed_station_entrances():
     for station in all_stations:
         station_id = station['id']
         
-        # Check if entrances already exist
-        existing = db.execute(
-            'SELECT COUNT(*) as count FROM station_entrances WHERE station_id = ?',
-            (station_id,)
-        ).fetchone()
-        
-        if existing['count'] > 0:
-            continue  # Skip if already has entrances
-        
-        if station_id not in stations_with_mta_data:
-            stations_needing_entrances.append(station)
+        # Check if we have MTA data for this station
+        if station_id in stations_with_mta_data:
+            continue  # Skip if we have real data
+            
+        stations_needing_entrances.append(station)
     
     # Ensure every station has at least 2 entrances
     # First, check which stations need more entrances
     stations_needing_more = []
     for station in all_stations:
         station_id = station['id']
-        existing_count = db.execute(
-            'SELECT COUNT(*) as count FROM station_entrances WHERE station_id = ?',
-            (station_id,)
-        ).fetchone()['count']
         
-        if existing_count < 2:
-            stations_needing_more.append((station, existing_count))
+        # Count how many entrances we have for this station in our matched list
+        current_count = 0
+        for ent in entrance_data:
+            if ent['station_id'] == station_id:
+                current_count += 1
+        
+        if current_count < 2:
+            stations_needing_more.append((station, current_count))
     
     # Add estimated entrances for stations without MTA data or with < 2 entrances
     if stations_needing_entrances or stations_needing_more:
@@ -380,10 +420,8 @@ def seed_station_entrances():
             station_name = station['name']
             
             # Check how many entrances this station already has
-            existing_count = db.execute(
-                'SELECT COUNT(*) as count FROM station_entrances WHERE station_id = ?',
-                (station_id,)
-            ).fetchone()['count']
+            # We passed this in as 'count' from the previous loop
+            existing_count = count
             
             # Create enough entrances to reach at least 2 total
             needed = max(2 - existing_count, 2)  # At least 2, or enough to reach 2
@@ -467,11 +505,11 @@ def seed_station_entrances():
             except:
                 continue
             
-            # Check if this entrance is already in database
-            coord_rounded = (round(lat, 5), round(lon, 5))
-            if any(abs(existing[1] - lat) < 0.0001 and abs(existing[2] - lon) < 0.0001 
-                   for existing in existing_entrance_coords):
-                continue
+            # Check if this entrance is already in database for this specific station
+            # We can't easily check per-station here because we haven't found the station yet.
+            # But we should allow sharing.
+            # So we only skip if we've seen this exact coordinate for a station we are about to match.
+            # Actually, let's just find the closest station first, THEN check if it already has this entrance.
             
             # Find closest station within 150m (pure distance match)
             min_dist = float('inf')
@@ -481,6 +519,11 @@ def seed_station_entrances():
                 if dist < 150 and dist < min_dist:
                     min_dist = dist
                     closest = station
+            
+            if closest:
+                # Check if this station already has this entrance
+                if (closest['id'], round(lat, 5), round(lon, 5)) in existing_entrance_coords:
+                    continue
             
             if closest:
                 entrance_type = entrance.get('entrance_type', '').strip() or "Entrance"
