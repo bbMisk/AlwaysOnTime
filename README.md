@@ -7,7 +7,7 @@ Minimal JavaScript; most logic in Python.
 
 ```bash
 # 1) Clone your empty GitHub repo locally (create it first on GitHub, name: AlwaysOnTime)
-git clone <YOUR_GITHUB_REPO_SSH_OR_HTTPS_URL> AlwaysOnTime
+git clone AlwaysOnTime
 cd AlwaysOnTime
 
 # 2) Create and activate a virtual environment
